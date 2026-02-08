@@ -10,8 +10,8 @@ import { measureAndReturn } from "../clickhouse/measureAndReturn";
 import { recordDistribution } from "../instrumentation";
 import { logger } from "../logger";
 import {
-  convertClickhouseToDomain,
-  convertClickhouseTracesListToDomain,
+  convertClickhouseToDomainAsync,
+  convertClickhouseTracesListToDomainAsync,
 } from "./traces_converters";
 import {
   DateTimeFilter,
@@ -651,8 +651,10 @@ export const getTraceByIdFromEventsTable = async ({
     },
   });
 
-  const res = records.map((record) =>
-    convertClickhouseToDomain(record, renderingProps),
+  const res = await Promise.all(
+    records.map((record) =>
+      convertClickhouseToDomainAsync(record, renderingProps),
+    ),
   );
 
   res.forEach((trace) => {
@@ -1186,7 +1188,7 @@ export const getTracesFromEventsTableForPublicApi = async (
   });
 
   // Convert ClickHouse format to domain format and handle field groups
-  return convertClickhouseTracesListToDomain(result, {
+  return convertClickhouseTracesListToDomainAsync(result, {
     scores: includeScores,
     observations: includeObservations,
     metrics: includeMetrics,

@@ -114,3 +114,24 @@ export const convertClickhouseTracesListToDomain = (
     };
   });
 };
+
+export const convertClickhouseTracesListToDomainAsync = async (
+  result: Array<TraceRecordReadType & TraceRecordExtraFieldsType>,
+  include: { observations: boolean; scores: boolean; metrics: boolean },
+): Promise<Array<TraceDomain & TraceRecordExtraFieldsType>> => {
+  return Promise.all(
+    result.map(async (trace) => {
+      return {
+        ...(await convertClickhouseToDomainAsync(
+          trace,
+          DEFAULT_RENDERING_PROPS,
+        )),
+        observations: include.observations ? trace.observations : [],
+        scores: include.scores ? trace.scores : [],
+        totalCost: include.metrics ? trace.totalCost : -1,
+        latency: include.metrics ? trace.latency : -1,
+        htmlPath: trace.htmlPath,
+      };
+    }),
+  );
+};
