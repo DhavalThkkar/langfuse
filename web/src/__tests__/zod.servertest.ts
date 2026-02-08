@@ -49,8 +49,18 @@ const jsonTestCases: [string, unknown][] = [
     '{"array": [1, 2], "nested": {"key": "value"}}',
     { array: [1, 2], nested: { key: "value" } },
   ], // Complex object
-  ["1983516295378495150", "1983516295378495150"], // Large number
+  ["1983516295378495150", "1983516295378495150"], // Large number (standalone)
   ["3.4", 3.4], // Decimal number
+  // Large numbers inside string values — should use fast path, not lossless
+  ['{"traceId": "1983516295378495150"}', { traceId: "1983516295378495150" }],
+  ['["1983516295378495150"]', ["1983516295378495150"]],
+  // Actual large number values — must be preserved as strings
+  ['{"count": 1983516295378495150}', { count: "1983516295378495150" }],
+  // Mixed: string value has digits, number value is safe
+  ['{"id": "9876543210123", "count": 42}', { id: "9876543210123", count: 42 }],
+  // Scientific notation inside string vs as value
+  ['{"k": "1.5e20"}', { k: "1.5e20" }],
+  ['{"k": 1.5e20}', { k: 1.5e20 }],
 ];
 
 describe("parseJsonPrioritised", () => {

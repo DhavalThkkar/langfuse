@@ -383,20 +383,65 @@ export function deepParseJsonIterative(
 }
 
 /**
- * Pattern to detect JSON numbers that might lose precision with native JSON.parse.
- *
- * Catches:
- * 1. [\d.]{13,} - 13+ characters of digits/dots (conservative threshold for ~12+ significant digits)
- * 2. \d[eE] - scientific notation (always use lossless-json for safety)
+ * Quick pattern to detect JSON numbers that might lose precision with native JSON.parse.
+ * Used as a fast pre-filter — matches anywhere in the string including inside string values.
  */
 const UNSAFE_NUMBER_PATTERN = /[\d.]{13,}|\d[eE]/;
+
+/**
+ * Standalone unsafe number: the entire string (modulo whitespace) is a number with
+ * 13+ digit/dot chars or scientific notation.
+ */
+const UNSAFE_STANDALONE_NUMBER =
+  /^\s*-?(?:\d[\d.]{12,}(?:[eE][+-]?\d+)?|\d+(?:\.\d*)?[eE][+-]?\d+)\s*$/;
+
+/**
+ * Unsafe number inside a JSON structure: 13+ digit/dot chars or scientific notation,
+ * followed by optional whitespace then a JSON structural character (, ] }).
+ * Per JSON grammar, number values must be followed by these characters.
+ * Digit sequences inside string values are followed by other characters (", letters, etc.).
+ */
+const UNSAFE_JSON_NUMBER =
+  /-?(?:\d[\d.]{12,}(?:[eE][+-]?\d+)?|\d+(?:\.\d*)?[eE][+-]?\d+)\s*(?=[,\]}])/;
+
+/**
+ * Detects digit/dot sequences long enough to cause O(n²) backtracking in UNSAFE_JSON_NUMBER.
+ * For sequences under this length, worst-case backtracking is ~3K steps (negligible).
+ */
+const LONG_DIGIT_SEQUENCE = /[\d.]{80}/;
+
+/**
+ * Checks whether a JSON string contains number values (not inside string literals)
+ * that might lose precision with native JSON.parse.
+ *
+ * Uses JSON grammar context: a number value must be followed by whitespace then
+ * one of , ] } or end of string. Gives up and returns true
+ * on very long digit sequences to avoid expensive check with
+ * quadratic complexity.
+ */
+function containsUnsafeNumber(json: string): boolean {
+  // Case 1: standalone numeric value — O(n), anchored
+  if (UNSAFE_STANDALONE_NUMBER.test(json)) return true;
+
+  // Quick pre-filter: if no potentially unsafe sequences at all, skip
+  if (!UNSAFE_NUMBER_PATTERN.test(json)) return false;
+
+  // Case 2: number inside JSON structure
+  // Guard: if string has very long digit sequences give up and say it's unsafe
+  if (LONG_DIGIT_SEQUENCE.test(json)) {
+    return true;
+  }
+
+  // Normal case: grammar-based regex (fast, no allocation)
+  return UNSAFE_JSON_NUMBER.test(json);
+}
 
 export const parseJsonPrioritised = (
   json: string,
 ): JsonNested | string | undefined => {
   try {
     // Fast path: use JSON.parse if no potentially unsafe numbers
-    if (!UNSAFE_NUMBER_PATTERN.test(json)) {
+    if (!containsUnsafeNumber(json)) {
       return JSON.parse(json) as JsonNested;
     }
     // Slow path
@@ -422,7 +467,7 @@ export const parseJsonPrioritisedAsync = async (
 ): Promise<JsonNested | string | undefined> => {
   try {
     // Precision path: use lossless-json for strings with potentially unsafe numbers
-    if (UNSAFE_NUMBER_PATTERN.test(json)) {
+    if (containsUnsafeNumber(json)) {
       return parseJsonLosslessPrioritized(json);
     }
 
