@@ -66,6 +66,21 @@ import { type EventsObservationPublic } from "../queries/createGenerationsQuery"
 import { UiColumnMappings } from "../../tableDefinitions";
 import { parseMetadataCHRecordToDomain } from "../utils/metadata_conversion";
 
+/**
+ * Attempt to command the legacy events table.
+ * Skips if env toggle is off; swallows errors if the table no longer exists.
+ */
+async function commandLegacyEventsTable(
+  opts: Parameters<typeof commandClickhouse>[0],
+): Promise<void> {
+  if (env.LANGFUSE_LEGACY_EVENTS_TABLE_EXISTS !== "true") return;
+  try {
+    await commandClickhouse(opts);
+  } catch (e) {
+    logger.warn("Legacy events table command failed (table may not exist)", e);
+  }
+}
+
 type ObservationsTableQueryResultWitouhtTraceFields = Omit<
   ObservationsTableQueryResult,
   "trace_tags" | "trace_name" | "trace_user_id"
@@ -1265,26 +1280,16 @@ export const updateEvents = async (
     ...updates,
   };
 
-  // Update both tables in parallel
+  const updateOpts = (table: string) => ({
+    query: `ALTER TABLE ${table} UPDATE ${setClauses.join(", ")} ${whereClause}`,
+    params,
+    tags: { type: table, kind: "update", projectId },
+  });
+
   await Promise.all([
-    commandClickhouse({
-      query: `ALTER TABLE events_full UPDATE ${setClauses.join(", ")} ${whereClause}`,
-      params,
-      tags: {
-        type: "events_full",
-        kind: "update",
-        projectId,
-      },
-    }),
-    commandClickhouse({
-      query: `ALTER TABLE events_core UPDATE ${setClauses.join(", ")} ${whereClause}`,
-      params,
-      tags: {
-        type: "events_core",
-        kind: "update",
-        projectId,
-      },
-    }),
+    commandClickhouse(updateOpts("events_full")),
+    commandClickhouse(updateOpts("events_core")),
+    commandLegacyEventsTable(updateOpts("events")),
   ]);
 };
 
@@ -1945,56 +1950,38 @@ export const deleteEventsByTraceIds = async (
     return;
   }
 
-  // Delete from both tables in parallel
+  const deleteParams = {
+    projectId,
+    traceIds,
+    minTs: preflight[0].min_ts,
+    maxTs: preflight[0].max_ts,
+  };
+  const deleteQuery = (table: string) => `
+    DELETE FROM ${table}
+    WHERE project_id = {projectId: String}
+    AND trace_id IN ({traceIds: Array(String)})
+    AND start_time >= {minTs: String}::DateTime64(3)
+    AND start_time <= {maxTs: String}::DateTime64(3)
+  `;
+  const deleteOpts = (table: string) => ({
+    query: deleteQuery(table),
+    params: deleteParams,
+    clickhouseConfigs: {
+      request_timeout: env.LANGFUSE_CLICKHOUSE_DELETION_TIMEOUT_MS,
+    },
+    tags: {
+      feature: "tracing",
+      type: table,
+      kind: "delete",
+      projectId,
+    },
+  });
+
+  // Delete from all tables in parallel
   await Promise.all([
-    commandClickhouse({
-      query: `
-        DELETE FROM events_full
-        WHERE project_id = {projectId: String}
-        AND trace_id IN ({traceIds: Array(String)})
-        AND start_time >= {minTs: String}::DateTime64(3)
-        AND start_time <= {maxTs: String}::DateTime64(3)
-      `,
-      params: {
-        projectId,
-        traceIds,
-        minTs: preflight[0].min_ts,
-        maxTs: preflight[0].max_ts,
-      },
-      clickhouseConfigs: {
-        request_timeout: env.LANGFUSE_CLICKHOUSE_DELETION_TIMEOUT_MS,
-      },
-      tags: {
-        feature: "tracing",
-        type: "events_full",
-        kind: "delete",
-        projectId,
-      },
-    }),
-    commandClickhouse({
-      query: `
-        DELETE FROM events_core
-        WHERE project_id = {projectId: String}
-        AND trace_id IN ({traceIds: Array(String)})
-        AND start_time >= {minTs: String}::DateTime64(3)
-        AND start_time <= {maxTs: String}::DateTime64(3)
-      `,
-      params: {
-        projectId,
-        traceIds,
-        minTs: preflight[0].min_ts,
-        maxTs: preflight[0].max_ts,
-      },
-      clickhouseConfigs: {
-        request_timeout: env.LANGFUSE_CLICKHOUSE_DELETION_TIMEOUT_MS,
-      },
-      tags: {
-        feature: "tracing",
-        type: "events_core",
-        kind: "delete",
-        projectId,
-      },
-    }),
+    commandClickhouse(deleteOpts("events_full")),
+    commandClickhouse(deleteOpts("events_core")),
+    commandLegacyEventsTable(deleteOpts("events")),
   ]);
 };
 
@@ -2033,39 +2020,20 @@ export const deleteEventsByProjectId = async (
   }
 
   // Delete from both tables in parallel
+  const deleteOpts = (table: string) => ({
+    query: `DELETE FROM ${table} WHERE project_id = {projectId: String}`,
+    params: { projectId },
+    clickhouseConfigs: {
+      request_timeout: env.LANGFUSE_CLICKHOUSE_DELETION_TIMEOUT_MS,
+    },
+    tags: { feature: "tracing", type: table, kind: "delete", projectId },
+    clickhouseSettings: { send_logs_level: "trace" as const },
+  });
+
   await Promise.all([
-    commandClickhouse({
-      query: `DELETE FROM events_full WHERE project_id = {projectId: String}`,
-      params: { projectId },
-      clickhouseConfigs: {
-        request_timeout: env.LANGFUSE_CLICKHOUSE_DELETION_TIMEOUT_MS,
-      },
-      tags: {
-        feature: "tracing",
-        type: "events_full",
-        kind: "delete",
-        projectId,
-      },
-      clickhouseSettings: {
-        send_logs_level: "trace",
-      },
-    }),
-    commandClickhouse({
-      query: `DELETE FROM events_core WHERE project_id = {projectId: String}`,
-      params: { projectId },
-      clickhouseConfigs: {
-        request_timeout: env.LANGFUSE_CLICKHOUSE_DELETION_TIMEOUT_MS,
-      },
-      tags: {
-        feature: "tracing",
-        type: "events_core",
-        kind: "delete",
-        projectId,
-      },
-      clickhouseSettings: {
-        send_logs_level: "trace",
-      },
-    }),
+    commandClickhouse(deleteOpts("events_full")),
+    commandClickhouse(deleteOpts("events_core")),
+    commandLegacyEventsTable(deleteOpts("events")),
   ]);
 
   return true;
@@ -2161,48 +2129,26 @@ export const deleteEventsOlderThanDays = async (
     return false;
   }
 
-  // Delete from both tables in parallel
+  const deleteOpts = (table: string) => ({
+    query: `
+      DELETE FROM ${table}
+      WHERE project_id = {projectId: String}
+      AND start_time < {cutoffDate: DateTime64(3)}
+    `,
+    params: {
+      projectId,
+      cutoffDate: convertDateToClickhouseDateTime(beforeDate),
+    },
+    clickhouseConfigs: {
+      request_timeout: env.LANGFUSE_CLICKHOUSE_DELETION_TIMEOUT_MS,
+    },
+    tags: { feature: "tracing", type: table, kind: "delete", projectId },
+  });
+
   await Promise.all([
-    commandClickhouse({
-      query: `
-        DELETE FROM events_full
-        WHERE project_id = {projectId: String}
-        AND start_time < {cutoffDate: DateTime64(3)}
-      `,
-      params: {
-        projectId,
-        cutoffDate: convertDateToClickhouseDateTime(beforeDate),
-      },
-      clickhouseConfigs: {
-        request_timeout: env.LANGFUSE_CLICKHOUSE_DELETION_TIMEOUT_MS,
-      },
-      tags: {
-        feature: "tracing",
-        type: "events_full",
-        kind: "delete",
-        projectId,
-      },
-    }),
-    commandClickhouse({
-      query: `
-        DELETE FROM events_core
-        WHERE project_id = {projectId: String}
-        AND start_time < {cutoffDate: DateTime64(3)}
-      `,
-      params: {
-        projectId,
-        cutoffDate: convertDateToClickhouseDateTime(beforeDate),
-      },
-      clickhouseConfigs: {
-        request_timeout: env.LANGFUSE_CLICKHOUSE_DELETION_TIMEOUT_MS,
-      },
-      tags: {
-        feature: "tracing",
-        type: "events_core",
-        kind: "delete",
-        projectId,
-      },
-    }),
+    commandClickhouse(deleteOpts("events_full")),
+    commandClickhouse(deleteOpts("events_core")),
+    commandLegacyEventsTable(deleteOpts("events")),
   ]);
 
   return true;

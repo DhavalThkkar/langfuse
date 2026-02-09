@@ -418,7 +418,7 @@ export class IngestionService {
       // Metadata
       metadata,
       metadata_names: metadataNames,
-      metadata_values: metadataValues,
+      metadata_raw_values: metadataValues,
 
       // Source/instrumentation metadata
       source: eventData.source,
@@ -461,14 +461,13 @@ export class IngestionService {
   }
 
   /**
-   * Writes an event record directly to the events_full table.
-   * A materialized view auto-populates events_core from events_full.
+   * Writes an event record directly to the events table.
    * Use createEventRecord() first to get the record, then call this to write.
    *
    * @param eventRecord - The event record to write
    */
   public writeEventRecord(eventRecord: EventRecordInsertType): void {
-    this.clickHouseWriter.addToQueue(TableName.EventsFull, eventRecord);
+    this.clickHouseWriter.addToQueue(TableName.Events, eventRecord);
   }
 
   private async processDatasetRunItemEventList(params: {

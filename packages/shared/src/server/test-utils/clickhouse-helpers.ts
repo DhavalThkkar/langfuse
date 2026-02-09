@@ -27,7 +27,7 @@ export const createObservationsCh = async (
 
 export const createEventsCh = async (events: EventRecordInsertType[]) => {
   return await clickhouseClient().insert({
-    table: "events_full",
+    table: "events",
     format: "JSONEachRow",
     values: events,
   });
