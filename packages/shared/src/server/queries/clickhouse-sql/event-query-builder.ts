@@ -446,7 +446,9 @@ abstract class BaseEventsQueryBuilder<
 
     // When ordering by start_time, prepend toStartOfMinute(e.start_time) to match
     // the table PRIMARY KEY: (project_id, toStartOfMinute(start_time), xxHash32(trace_id))
-    const startTimeEntry = entries.find((e) => e.column.endsWith("start_time"));
+    const startTimeEntry = entries.find((e) =>
+      e.column.replace(/"/g, "").endsWith("start_time"),
+    );
     if (startTimeEntry) {
       columns.push(`toStartOfMinute(e.start_time) ${startTimeEntry.direction}`);
     }
