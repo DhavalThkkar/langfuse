@@ -9,7 +9,13 @@ import {
   SelectValue,
 } from "@/src/components/ui/select";
 import { DatePicker } from "@/src/components/date-picker";
-import { useState, useEffect, type Dispatch, type SetStateAction } from "react";
+import {
+  useState,
+  useEffect,
+  useRef,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import useProjectIdFromURL from "@/src/hooks/useProjectIdFromURL";
 import { api } from "@/src/utils/api";
 import {
@@ -72,15 +78,18 @@ export function PopoverFilterBuilder({
   columns,
   filterState,
   onChange,
+  columnIdentifier = "name",
   columnsWithCustomSelect = [],
   filterWithAI = false,
   buttonType = "default",
 }: {
+  /** Which column field to persist in filter.column: 'id' for stable refs, 'name' for legacy compatibility */
   columns: ColumnDefinitionWithAlert[];
   filterState: FilterState;
   onChange:
     | Dispatch<SetStateAction<FilterState>>
     | ((newState: FilterState) => void);
+  columnIdentifier?: ColumnIdentifier;
   columnsWithCustomSelect?: string[];
   filterWithAI?: boolean;
   buttonType?: "default" | "icon";
@@ -88,6 +97,26 @@ export function PopoverFilterBuilder({
   const capture = usePostHogClientCapture();
   const [wipFilterState, _setWipFilterState] =
     useState<WipFilterState>(filterState);
+
+  // Sync wipFilterState when filterState prop changes externally
+  // (e.g., when a saved view preset is applied)
+  // We use a ref to track previous filterState to avoid re-running when wipFilterState changes
+  const prevFilterStateRef = useRef(filterState);
+  useEffect(() => {
+    // Only sync if filterState actually changed (reference comparison is fine here
+    // since filterState comes from URL parsing which creates new arrays)
+    if (prevFilterStateRef.current === filterState) return;
+    prevFilterStateRef.current = filterState;
+
+    _setWipFilterState((currentWip) => {
+      const hasWipFilters = currentWip.some(
+        (f) => !singleFilter.safeParse(f).success,
+      );
+      // Don't sync if user is actively editing (has invalid WIP filters)
+      return hasWipFilters ? currentWip : filterState;
+    });
+  }, [filterState]);
+
   const addNewFilter = () => {
     setWipFilterState((prev) => [
       ...prev,
@@ -185,6 +214,7 @@ export function PopoverFilterBuilder({
           align="start"
         >
           <FilterBuilderForm
+            columnIdentifier={columnIdentifier}
             columns={columns}
             filterState={wipFilterState}
             onChange={setWipFilterState}
@@ -251,26 +281,42 @@ export function InlineFilterState({
           ? `.${filter.key}`
           : ""}{" "}
         {filter.operator}{" "}
-        {filter.type === "datetime"
-          ? new Date(filter.value).toLocaleString()
-          : filter.type === "stringOptions" || filter.type === "arrayOptions"
-            ? filter.value.length > 2
-              ? `${filter.value.length} selected`
-              : filter.value.join(", ")
-            : filter.type === "number" || filter.type === "numberObject"
-              ? filter.value
-              : filter.type === "boolean"
-                ? `${filter.value}`
-                : `"${filter.value}"`}
+        {filter.type === "positionInTrace"
+          ? (() => {
+              const mode = filter.key ?? "last";
+              const label =
+                mode === "root"
+                  ? "root"
+                  : mode === "last"
+                    ? "last"
+                    : mode === "nthFromStart"
+                      ? `nth from start ${filter.value ?? ""}`.trim()
+                      : `nth from end ${filter.value ?? ""}`.trim();
+              return label;
+            })()
+          : filter.type === "datetime"
+            ? new Date(filter.value).toLocaleString()
+            : filter.type === "stringOptions" || filter.type === "arrayOptions"
+              ? filter.value.length > 2
+                ? `${filter.value.length} selected`
+                : filter.value.join(", ")
+              : filter.type === "number" || filter.type === "numberObject"
+                ? filter.value
+                : filter.type === "boolean"
+                  ? `${filter.value}`
+                  : `"${filter.value}"`}
       </span>
     );
   });
 }
 
+type ColumnIdentifier = "id" | "name";
+
 export function InlineFilterBuilder({
   columns,
   filterState,
   onChange,
+  columnIdentifier = "name",
   disabled,
   columnsWithCustomSelect,
   filterWithAI = false,
@@ -280,6 +326,8 @@ export function InlineFilterBuilder({
   onChange:
     | Dispatch<SetStateAction<FilterState>>
     | ((newState: FilterState) => void);
+  /** Which column field to persist in filter.column: 'id' for stable refs, 'name' for legacy compatibility */
+  columnIdentifier?: ColumnIdentifier;
   disabled?: boolean;
   columnsWithCustomSelect?: string[];
   filterWithAI?: boolean;
@@ -316,6 +364,7 @@ export function InlineFilterBuilder({
   return (
     <div className="flex flex-col">
       <FilterBuilderForm
+        columnIdentifier={columnIdentifier}
         columns={columns}
         filterState={wipFilterState}
         onChange={setWipFilterState}
@@ -358,6 +407,7 @@ const getAlertStyles = (severity: "info" | "warning" | "error") => {
 };
 
 function FilterBuilderForm({
+  columnIdentifier,
   columns,
   filterState,
   onChange,
@@ -365,6 +415,7 @@ function FilterBuilderForm({
   columnsWithCustomSelect = [],
   filterWithAI = false,
 }: {
+  columnIdentifier: ColumnIdentifier;
   columns: ColumnDefinitionWithAlert[];
   filterState: WipFilterState;
   onChange: Dispatch<SetStateAction<WipFilterState>>;
@@ -604,11 +655,14 @@ function FilterBuilderForm({
 
                                         handleFilterChange(
                                           {
-                                            column: col?.name,
+                                            column: col?.[columnIdentifier],
                                             type: col?.type,
                                             operator: defaultOperator,
                                             value: undefined,
-                                            key: undefined,
+                                            key:
+                                              col?.type === "positionInTrace"
+                                                ? "last"
+                                                : undefined,
                                           } as WipFilterCondition,
                                           i,
                                         );
@@ -717,6 +771,42 @@ function FilterBuilderForm({
                                 {option.label}
                               </SelectItem>
                             ))}
+                          </SelectContent>
+                        </Select>
+                      ) : filter.type === "positionInTrace" ? (
+                        <Select
+                          onValueChange={(value) => {
+                            const needsValue =
+                              value === "nthFromEnd" ||
+                              value === "nthFromStart";
+                            handleFilterChange(
+                              {
+                                ...filter,
+                                key: value,
+                                value: needsValue
+                                  ? typeof filter.value === "number" &&
+                                    filter.value >= 1
+                                    ? filter.value
+                                    : 1
+                                  : undefined,
+                              } as WipFilterCondition,
+                              i,
+                            );
+                          }}
+                          value={filter.key ?? "last"}
+                        >
+                          <SelectTrigger className="min-w-[140px]">
+                            <SelectValue placeholder="" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="root">root</SelectItem>
+                            <SelectItem value="last">last</SelectItem>
+                            <SelectItem value="nthFromStart">
+                              nth from start
+                            </SelectItem>
+                            <SelectItem value="nthFromEnd">
+                              nth from end
+                            </SelectItem>
                           </SelectContent>
                         </Select>
                       ) : null}
@@ -872,6 +962,30 @@ function FilterBuilderForm({
                             ))}
                           </SelectContent>
                         </Select>
+                      ) : filter.type === "positionInTrace" ? (
+                        filter.key === "nthFromStart" ||
+                        filter.key === "nthFromEnd" ? (
+                          <Input
+                            value={filter.value ?? ""}
+                            disabled={disabled}
+                            type="number"
+                            min={1}
+                            step={1}
+                            onChange={(e) =>
+                              handleFilterChange(
+                                {
+                                  ...filter,
+                                  value: isNaN(Number(e.target.value))
+                                    ? undefined
+                                    : Math.max(1, Number(e.target.value)),
+                                } as WipFilterCondition,
+                                i,
+                              )
+                            }
+                          />
+                        ) : (
+                          <Input disabled placeholder="-" />
+                        )
                       ) : (
                         <Input disabled />
                       )}

@@ -1,17 +1,12 @@
-import { useState, useMemo, useRef } from "react";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/src/components/ui/dialog";
+import { useState, useMemo } from "react";
+import { useRouter } from "next/router";
+import Page from "@/src/components/layouts/page";
 import { api } from "@/src/utils/api";
 import { InnerEvaluatorForm } from "@/src/features/evals/components/inner-evaluator-form";
 import {
   mapLegacyToModernTarget,
-  isLegacyEvalTarget,
   isTraceTarget,
+  isEventTarget,
 } from "@/src/features/evals/utils/typeHelpers";
 import { type PartialConfig } from "@/src/features/evals/types";
 import { Alert, AlertDescription } from "@/src/components/ui/alert";
@@ -26,38 +21,25 @@ import {
 } from "@/src/components/ui/dropdown-menu";
 import { ChevronDown } from "lucide-react";
 import { useEvalCapabilities } from "@/src/features/evals/hooks/useEvalCapabilities";
-import { useSynchronizedScroll } from "@/src/features/evals/hooks/useSynchronizedScroll";
-
-interface RemapEvalWizardProps {
-  projectId: string;
-  evalConfigId: string;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onSuccess?: () => void;
-}
 
 type LegacyEvalAction = "keep-active" | "mark-inactive" | "delete";
 
-export function RemapEvalWizard({
-  projectId,
-  evalConfigId,
-  open,
-  onOpenChange,
-  onSuccess,
-}: RemapEvalWizardProps) {
+export default function RemapEvaluatorPage() {
+  const router = useRouter();
+  const projectId = router.query.projectId as string;
+  const evalConfigId = router.query.evaluator as string;
+
   const evalCapabilities = useEvalCapabilities(projectId);
 
   const [error, setError] = useState<string | null>(null);
   const [legacyAction, setLegacyAction] =
     useState<LegacyEvalAction>("mark-inactive");
-  const leftScrollRef = useRef<HTMLDivElement>(null);
-  const rightScrollRef = useRef<HTMLDivElement>(null);
 
   // Fetch old eval config
   const { data: oldConfig, isLoading: isLoadingConfig } =
     api.evals.configById.useQuery(
       { projectId, id: evalConfigId },
-      { enabled: open },
+      { enabled: !!projectId && !!evalConfigId },
     );
 
   // Fetch eval template
@@ -67,7 +49,7 @@ export function RemapEvalWizard({
         projectId,
         id: oldConfig?.evalTemplateId ?? "",
       },
-      { enabled: open && !!oldConfig?.evalTemplateId },
+      { enabled: !!projectId && !!oldConfig?.evalTemplateId },
     );
 
   const utils = api.useUtils();
@@ -76,8 +58,7 @@ export function RemapEvalWizard({
   const updateJobMutation = api.evals.updateEvalJob.useMutation({
     onSuccess: () => {
       utils.evals.invalidate();
-      onOpenChange(false);
-      onSuccess?.();
+      void router.push(`/project/${projectId}/evals`);
     },
     onError: (err) => {
       setError(err.message ?? "Failed to update old eval configuration");
@@ -88,8 +69,7 @@ export function RemapEvalWizard({
   const deleteJobMutation = api.evals.deleteEvalJob.useMutation({
     onSuccess: () => {
       utils.evals.invalidate();
-      onOpenChange(false);
-      onSuccess?.();
+      void router.push(`/project/${projectId}/evals`);
     },
     onError: (err) => {
       setError(err.message ?? "Failed to delete old eval configuration");
@@ -117,12 +97,6 @@ export function RemapEvalWizard({
     };
   }, [oldConfig]);
 
-  // Validate that old config is actually legacy
-  const isValidForRemapping = useMemo(() => {
-    if (!oldConfig) return false;
-    return isLegacyEvalTarget(oldConfig.targetObject);
-  }, [oldConfig]);
-
   const handleFormSuccess = async () => {
     if (!oldConfig) return;
 
@@ -131,8 +105,7 @@ export function RemapEvalWizard({
         case "keep-active":
           // Do nothing - both old and new evals will be active
           utils.evals.invalidate();
-          onOpenChange(false);
-          onSuccess?.();
+          void router.push(`/project/${projectId}/evals`);
           break;
         case "mark-inactive":
           // Set old eval to INACTIVE
@@ -160,21 +133,23 @@ export function RemapEvalWizard({
 
   const isLoading = isLoadingConfig || isLoadingTemplate;
 
-  // Synchronized scrolling between left (legacy) and right (new) config panels
-  useSynchronizedScroll(leftScrollRef, rightScrollRef, [
-    isLoading,
-    oldConfig,
-    evalTemplate,
-  ]);
-
-  if (!open) return null;
-
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[90vh] flex-col" size="xxl">
-        <DialogHeader>
-          <DialogTitle>Upgrade Evaluator</DialogTitle>
-          <DialogDescription>
+    <Page
+      withPadding
+      scrollable
+      headerProps={{
+        title: "Upgrade Evaluator",
+        breadcrumb: [
+          {
+            name: "Running Evaluators",
+            href: `/project/${projectId}/evals`,
+          },
+        ],
+      }}
+    >
+      <div className="space-y-4">
+        <div>
+          <p className="text-sm text-muted-foreground">
             Review your legacy evaluator on the left and configure the new eval
             settings on the right.{" "}
             <a
@@ -186,41 +161,50 @@ export function RemapEvalWizard({
               Follow our step-by-step guide
             </a>{" "}
             to upgrade successfully.
-          </DialogDescription>
-        </DialogHeader>
+          </p>
+          {mappedConfig ? (
+            <Alert
+              variant="default"
+              className="mt-2 border-light-yellow bg-light-yellow"
+            >
+              <AlertDescription>
+                <div className="flex flex-col gap-2">
+                  {isEventTarget(mappedConfig.targetObject ?? "event")
+                    ? "Running evaluators requires JS SDK ≥ 4.0.0 or Python SDK ≥ 3.0.0."
+                    : "Running evaluators requires JS SDK ≥ 4.4.0 or Python SDK ≥ 3.9.0."}
+                </div>
+              </AlertDescription>
+            </Alert>
+          ) : null}
+        </div>
 
-        {isLoading ? (
-          <div className="grid flex-1 grid-cols-2 gap-6 overflow-auto">
-            <Skeleton className="h-full w-full" />
-            <Skeleton className="h-full w-full" />
-          </div>
-        ) : !isValidForRemapping ? (
-          <Alert variant="destructive">
-            <AlertDescription>
-              This eval configuration is not a legacy eval and does not need
-              remapping.
-            </AlertDescription>
-          </Alert>
-        ) : !oldConfig || !evalTemplate ? (
-          <Alert variant="destructive">
-            <AlertDescription>
-              Failed to load eval configuration or template.
-            </AlertDescription>
-          </Alert>
-        ) : (
-          <div className="grid flex-1 grid-cols-[1fr_2px_1fr] overflow-hidden">
-            {/* LEFT: Read-only old config */}
-            <div className="flex flex-col space-y-4 overflow-hidden p-3">
-              <div className="flex items-center gap-2 bg-background pb-2">
-                <h3 className="text-lg font-semibold">
-                  Legacy Configuration{" "}
-                  {isTraceTarget(oldConfig.targetObject)
-                    ? "(runs on traces)"
-                    : ""}
-                </h3>
-                <span className="text-xs text-muted-foreground">Read-only</span>
-              </div>
-              <div ref={leftScrollRef} className="flex-1 overflow-auto">
+        <div>
+          {isLoading ? (
+            <div className="grid grid-cols-2 gap-6">
+              <Skeleton className="h-[600px] w-full" />
+              <Skeleton className="h-[600px] w-full" />
+            </div>
+          ) : !oldConfig || !evalTemplate ? (
+            <Alert variant="destructive">
+              <AlertDescription>
+                Failed to load eval configuration or template.
+              </AlertDescription>
+            </Alert>
+          ) : (
+            <div className="grid grid-cols-[1fr_2px_1fr] items-start">
+              {/* LEFT: Read-only old config */}
+              <div className="space-y-4 p-3">
+                <div className="flex items-center gap-2 pb-2">
+                  <h3 className="text-lg font-semibold">
+                    Legacy Configuration{" "}
+                    {isTraceTarget(oldConfig.targetObject)
+                      ? "(runs on traces)"
+                      : ""}
+                  </h3>
+                  <span className="text-xs text-muted-foreground">
+                    Read-only
+                  </span>
+                </div>
                 <InnerEvaluatorForm
                   projectId={projectId}
                   evalTemplate={evalTemplate}
@@ -236,19 +220,17 @@ export function RemapEvalWizard({
                   evalCapabilities={evalCapabilities}
                 />
               </div>
-            </div>
 
-            <Separator orientation="vertical" className="h-full" />
+              <Separator orientation="vertical" className="self-stretch" />
 
-            {/* RIGHT: Editable new config form */}
-            <div className="flex flex-col space-y-4 overflow-hidden p-3">
-              <h3 className="bg-background pb-2 text-lg font-semibold">
-                New Configuration{" "}
-                {isTraceTarget(oldConfig.targetObject)
-                  ? "(runs on observations)"
-                  : ""}
-              </h3>
-              <div ref={rightScrollRef} className="flex-1 overflow-auto">
+              {/* RIGHT: Editable new config form */}
+              <div className="space-y-4 p-3">
+                <h3 className="pb-2 text-lg font-semibold">
+                  New Configuration{" "}
+                  {isTraceTarget(oldConfig.targetObject)
+                    ? "(runs on observations)"
+                    : ""}
+                </h3>
                 <InnerEvaluatorForm
                   projectId={projectId}
                   evalTemplate={evalTemplate}
@@ -261,6 +243,7 @@ export function RemapEvalWizard({
                   preventRedirect={true}
                   hideAdvancedSettings={true}
                   evalCapabilities={evalCapabilities}
+                  oldConfigId={evalConfigId}
                   renderFooter={({ isLoading, formError }) => (
                     <div className="flex w-full flex-col items-end gap-4">
                       <div className="flex items-center">
@@ -317,15 +300,15 @@ export function RemapEvalWizard({
                 />
               </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
         {error && (
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         )}
-      </DialogContent>
-    </Dialog>
+      </div>
+    </Page>
   );
 }
