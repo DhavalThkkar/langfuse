@@ -958,7 +958,7 @@ export const getObservationsV2FromEventsTableForPublicApi = async (
   return await enrichObservationsWithModelData(
     observationRecords,
     opts.projectId,
-    Boolean(opts.parseIoAsJson),
+    false, // V2 API: IO fields are always returned as raw strings
     opts.fields, // V2 API: field groups specified, return partial observations
   );
 };
