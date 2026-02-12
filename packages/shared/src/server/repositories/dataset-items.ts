@@ -20,6 +20,7 @@ import {
   parseClickhouseUTCDateTimeFormat,
   queryClickhouse,
 } from "./clickhouse";
+import { postgresSearchCondition } from "../queries";
 
 const emptyNormalizeOpts: { sanitizeControlChars?: boolean } = {};
 const emptyValidateOpts: { normalizeUndefinedToNull?: boolean } = {};
@@ -928,48 +929,6 @@ function buildPrismaWhereFromFilterState(filterState: FilterState): any {
 }
 
 /**
- * Builds SQL search filter for full-text search on dataset items.
- * Applies ILIKE search on id, input, expectedOutput, and metadata fields.
- * Returns Prisma.empty if no search query provided.
- *
- * @param tableAlias - The table alias to use (default 'di' for dataset items)
- */
-function buildDatasetItemSearchCondition(
-  searchQuery?: string,
-  searchType?: ("id" | "content")[],
-  tableAlias: string = "di",
-): Prisma.Sql {
-  if (!searchQuery || searchQuery === "") {
-    return Prisma.empty;
-  }
-
-  const types = searchType ?? ["content"];
-  const searchConditions: Prisma.Sql[] = [];
-
-  if (types.includes("id")) {
-    searchConditions.push(
-      Prisma.sql`${Prisma.raw(tableAlias)}.id ILIKE ${`%${searchQuery}%`}`,
-    );
-  }
-
-  if (types.includes("content")) {
-    searchConditions.push(
-      Prisma.sql`${Prisma.raw(tableAlias)}.input::text ILIKE ${`%${searchQuery}%`}`,
-    );
-    searchConditions.push(
-      Prisma.sql`${Prisma.raw(tableAlias)}.expected_output::text ILIKE ${`%${searchQuery}%`}`,
-    );
-    searchConditions.push(
-      Prisma.sql`${Prisma.raw(tableAlias)}.metadata::text ILIKE ${`%${searchQuery}%`}`,
-    );
-  }
-
-  return searchConditions.length > 0
-    ? Prisma.sql` AND (${Prisma.join(searchConditions, " OR ")})`
-    : Prisma.empty;
-}
-
-/**
  * Builds SQL query for STATEFUL dataset items with search support.
  * Simple direct query without version logic.
  */
@@ -1001,11 +960,17 @@ function buildStatefulDatasetItemsQuery(
     "dataset_item_events",
   );
 
-  const searchCondition = buildDatasetItemSearchCondition(
+  const searchCondition = postgresSearchCondition({
     searchQuery,
-    searchType,
-    "di",
-  );
+    searchType: searchType,
+    tablePrefix: "di",
+    metadataColumns: ["id"],
+    contentColumns: {
+      content: ["input", "expected_output", "metadata"],
+      input: "input",
+      output: "expected_output",
+    },
+  });
 
   const paginationClause =
     limit !== undefined
@@ -1050,11 +1015,17 @@ function buildStatefulDatasetItemsCountQuery(
     "dataset_item_events",
   );
 
-  const searchCondition = buildDatasetItemSearchCondition(
+  const searchCondition = postgresSearchCondition({
     searchQuery,
-    searchType,
-    "di",
-  );
+    searchType: searchType,
+    tablePrefix: "di",
+    metadataColumns: ["id"],
+    contentColumns: {
+      content: ["input", "expected_output", "metadata"],
+      input: "input",
+      output: "expected_output",
+    },
+  });
 
   return Prisma.sql`
     SELECT COUNT(*) as count
@@ -1109,10 +1080,16 @@ function buildDatasetItemsAtVersionQuery(
     "dataset_item_events",
   );
 
-  const searchCondition = buildDatasetItemSearchCondition(
+  const searchCondition = postgresSearchCondition({
     searchQuery,
-    searchType,
-  );
+    searchType: searchType,
+    metadataColumns: ["id"],
+    contentColumns: {
+      content: ["input", "expected_output", "metadata"],
+      input: "input",
+      output: "expected_output",
+    },
+  });
 
   const paginationClause =
     limit !== undefined
@@ -1169,10 +1146,16 @@ function buildDatasetItemsCountQuery(
     "dataset_item_events",
   );
 
-  const searchCondition = buildDatasetItemSearchCondition(
+  const searchCondition = postgresSearchCondition({
     searchQuery,
-    searchType,
-  );
+    searchType: searchType ?? ["content"],
+    metadataColumns: ["id"],
+    contentColumns: {
+      content: ["input", "expected_output", "metadata"],
+      input: "input",
+      output: "expected_output",
+    },
+  });
 
   // New temporal query using valid_from and valid_to
   // Much simpler and more performant - no DISTINCT ON or CTE needed!
