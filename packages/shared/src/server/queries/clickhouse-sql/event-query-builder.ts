@@ -72,8 +72,6 @@ const EVENTS_FIELDS = {
   input: "e.input",
   output: "e.output",
   metadata: "mapFromArrays(e.metadata_names, e.metadata_values) as metadata",
-  metadataDirect: "e.metadata as metadata", // Direct JSON column access for exports
-
   // Trace-level denormalized fields
   tags: "e.tags as tags",
   release: "e.release as release",
@@ -640,8 +638,6 @@ export class EventsQueryBuilder extends BaseEventsQueryBuilder<
   private ioFields: { truncated: boolean; charLimit?: number } | null = null;
   // Metadata expansion config: null = use truncated (default), string[] = expand specific keys, empty array = expand all
   private metadataExpansionKeys: string[] | null = null;
-  // Flag to use direct metadata JSON column instead of array-based metadata
-  private useDirectMetadata: boolean = false;
   // Raw SELECT expressions for custom columns (e.g., from CTEs)
   private rawSelectExpressions: string[] = [];
 
@@ -661,33 +657,17 @@ export class EventsQueryBuilder extends BaseEventsQueryBuilder<
   }
 
   /**
-   * Select metadata with expanded values for specified keys.
-   * Expands truncated metadata values by coalescing with metadata_long_values.
+   * Select metadata with expanded (non-truncated) values from events_full.
    *
-   * @param keys - Keys to expand. Only the specified keys will have their full values returned.
+   * @param keys - Keys to expand. Empty array = expand all keys.
    *
    * @example
-   * // Expand specific keys only
-   * builder.selectMetadataExpanded(['transcript', 'transitions'])
+   * builder.selectMetadataExpanded(['transcript', 'transitions']) // specific keys
+   * builder.selectMetadataExpanded([]) // all keys
    */
-  selectMetadataExpanded(keys: string[]): this {
+  selectMetadataExpanded(keys: string[] = []): this {
     this.metadataExpansionKeys = keys;
-    // Also ensure metadata is in the select fields (will be replaced in buildSelectClause)
     this.selectFields.add("metadata");
-    return this;
-  }
-
-  /**
-   * Select metadata using direct JSON column access instead of array-based reconstruction.
-   * Use this for exports where full metadata values are needed without truncation.
-   *
-   * @example
-   * builder.selectMetadataDirect()
-   */
-  selectMetadataDirect(): this {
-    this.useDirectMetadata = true;
-    this.selectFields.add("metadataDirect");
-
     return this;
   }
 
@@ -737,11 +717,10 @@ export class EventsQueryBuilder extends BaseEventsQueryBuilder<
     if (this.ioFields) {
       fieldsToExclude.push("input", "output");
     }
-    // Exclude array-based metadata if using direct JSON metadata or expanded metadata
+    // Exclude default metadata when specific expansion keys are provided (custom SELECT expression is added below)
     if (
-      this.useDirectMetadata ||
-      (this.metadataExpansionKeys !== null &&
-        this.metadataExpansionKeys.length > 0)
+      this.metadataExpansionKeys !== null &&
+      this.metadataExpansionKeys.length > 0
     ) {
       fieldsToExclude.push("metadata");
     }
@@ -806,11 +785,9 @@ export class EventsQueryBuilder extends BaseEventsQueryBuilder<
     // Need full I/O? (truncated = false means we need full data)
     const needsFullIO = this.ioFields !== null && !this.ioFields.truncated;
 
-    // Need full metadata? (expansion requested with metadata in select)
+    // Need full metadata? (any expansion requested — specific keys or all)
     const needsFullMetadata =
-      this.metadataExpansionKeys !== null &&
-      this.metadataExpansionKeys.length > 0 &&
-      this.selectFields.has("metadata");
+      this.metadataExpansionKeys !== null && this.selectFields.has("metadata");
 
     return needsFullIO || needsFullMetadata;
   }
