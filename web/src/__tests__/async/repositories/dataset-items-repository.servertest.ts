@@ -1695,7 +1695,7 @@ describe("Dataset Items Repository - Versioning Tests", () => {
     it("should search dataset items by expected output only", async () => {
       const datasetId = v4();
       await prisma.dataset.create({
-        data: { id: datasetId, name: "search-test-dataset", projectId },
+        data: { id: datasetId, name: v4(), projectId },
       });
 
       // Create dataset items with distinct input and expected output
