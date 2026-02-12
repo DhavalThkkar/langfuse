@@ -1008,7 +1008,7 @@ function buildStatefulDatasetItemsCountQuery(
   projectId: string,
   filter: FilterState,
   searchQuery?: string,
-  searchType?: ("id" | "content")[],
+  searchType?: TracingSearchType[],
 ): Prisma.Sql {
   const filterCondition = tableColumnsToSqlFilterAndPrefix(
     filter,
@@ -1558,7 +1558,7 @@ export async function getDatasetItemsCount(props: {
   filterState: FilterState;
   version?: Date;
   searchQuery?: string;
-  searchType?: ("id" | "content")[];
+  searchType?: TracingSearchType[];
 }): Promise<number> {
   return executeWithDatasetServiceStrategy(OperationType.READ, {
     [Implementation.STATEFUL]: async () => {
