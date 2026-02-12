@@ -322,8 +322,15 @@ export function DataTableToolbar<TData, TValue>({
                       <DropdownMenuSubTrigger
                         disabled={!searchConfig.tableAllowsFullTextSearch}
                       >
-                        {searchConfig.customDropdownLabels?.fullText ??
-                          "Full Text"}
+                        <span className="flex items-center gap-2">
+                          {getSearchMode(searchConfig.searchType).startsWith(
+                            "metadata_fulltext",
+                          ) && (
+                            <span className="h-2 w-2 shrink-0 rounded-full bg-current" />
+                          )}
+                          {searchConfig.customDropdownLabels?.fullText ??
+                            "Full Text"}
+                        </span>
                       </DropdownMenuSubTrigger>
                       <DropdownMenuSubContent>
                         <DropdownMenuRadioGroup
