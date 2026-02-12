@@ -21,6 +21,7 @@ import {
   queryClickhouse,
 } from "./clickhouse";
 import { postgresSearchCondition } from "../queries";
+import { TracingSearchType } from "../../interfaces/search";
 
 const emptyNormalizeOpts: { sanitizeControlChars?: boolean } = {};
 const emptyValidateOpts: { normalizeUndefinedToNull?: boolean } = {};
@@ -938,7 +939,7 @@ function buildStatefulDatasetItemsQuery(
   includeDatasetName: boolean,
   filter: FilterState,
   searchQuery?: string,
-  searchType?: ("id" | "content")[],
+  searchType?: TracingSearchType[],
   limit?: number,
   offset?: number,
 ): Prisma.Sql {
@@ -1058,7 +1059,7 @@ function buildDatasetItemsAtVersionQuery(
   filter: FilterState,
   version: Date | undefined,
   searchQuery?: string,
-  searchType?: ("id" | "content")[],
+  searchType?: TracingSearchType[],
   limit?: number,
   offset?: number,
 ): Prisma.Sql {
@@ -1138,7 +1139,7 @@ function buildDatasetItemsCountQuery(
   filter: FilterState,
   version?: Date,
   searchQuery?: string,
-  searchType?: ("id" | "content")[],
+  searchType?: TracingSearchType[],
 ): Prisma.Sql {
   const filterCondition = tableColumnsToSqlFilterAndPrefix(
     filter,
@@ -1256,7 +1257,7 @@ async function getDatasetItemsInternal<
   filter: FilterState;
   version?: Date;
   searchQuery?: string;
-  searchType?: ("id" | "content")[];
+  searchType?: TracingSearchType[];
   limit?: number;
   offset?: number;
 }): Promise<
@@ -1312,7 +1313,7 @@ async function getDatasetItemsCountAtVersionInternal(params: {
   filterState: FilterState;
   version?: Date;
   searchQuery?: string;
-  searchType?: ("id" | "content")[];
+  searchType?: TracingSearchType[];
 }): Promise<number> {
   const query = buildDatasetItemsCountQuery(
     params.projectId,
@@ -1440,7 +1441,7 @@ export async function getDatasetItems<
   filterState: FilterState;
   version?: Date;
   searchQuery?: string;
-  searchType?: ("id" | "content")[];
+  searchType?: TracingSearchType[];
   includeIO?: IncludeIO;
   includeDatasetName?: IncludeDatasetName;
   limit?: number;
