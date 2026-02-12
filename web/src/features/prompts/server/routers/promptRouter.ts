@@ -105,7 +105,9 @@ export const promptRouter = createTRPCRouter({
         : Prisma.empty;
 
       const additionalConditions = input.searchType?.includes("id")
-        ? [Prisma.sql`p.name ILIKE ${`%${input.searchQuery}%`}`]
+        ? [
+            Prisma.sql`EXISTS (SELECT 1 FROM UNNEST(p.tags) AS tag WHERE tag ILIKE ${`%${input.searchQuery}%`})`,
+          ]
         : [];
 
       const searchCondition = postgresSearchCondition({
@@ -201,7 +203,9 @@ export const promptRouter = createTRPCRouter({
         : Prisma.empty;
 
       const additionalConditions = input.searchType?.includes("id")
-        ? [Prisma.sql`p.name ILIKE ${`%${input.searchQuery}%`}`]
+        ? [
+            Prisma.sql`EXISTS (SELECT 1 FROM UNNEST(p.tags) AS tag WHERE tag ILIKE ${`%${input.searchQuery}%`})`,
+          ]
         : [];
 
       const searchCondition = postgresSearchCondition({
