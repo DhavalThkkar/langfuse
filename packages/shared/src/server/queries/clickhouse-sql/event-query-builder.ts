@@ -1,6 +1,13 @@
 import { OBSERVATIONS_TO_TRACE_INTERVAL } from "../../repositories/constants";
 
 /**
+ * Any query builder that can produce a final query string with parameters.
+ */
+export interface QueryWithParams {
+  buildWithParams(): { query: string; params: Record<string, any> };
+}
+
+/**
  * Types for structured ORDER BY API
  */
 export type OrderByDirection = "ASC" | "DESC";

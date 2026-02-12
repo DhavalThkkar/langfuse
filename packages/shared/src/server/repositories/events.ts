@@ -61,6 +61,7 @@ import {
   EventsQueryBuilder,
   CTEQueryBuilder,
   EventsAggQueryBuilder,
+  type QueryWithParams,
 } from "../queries/clickhouse-sql/event-query-builder";
 import { type EventsObservationPublic } from "../queries/createGenerationsQuery";
 import { UiColumnMappings } from "../../tableDefinitions";
@@ -742,10 +743,23 @@ type PublicApiObservationsQuery = {
   expandMetadataKeys?: string[] | null;
 };
 
-function buildObservationsQueryBase(
+/**
+ * Build observation query components: an EventsQueryBuilder (with JOINs and filters but
+ * without CTEs) and any external CTEs that should be composed at the outer level.
+ *
+ * This enables CTE-based split queries where external CTEs (e.g. traces) are hoisted
+ * to the outer WITH clause rather than embedded in the EventsQueryBuilder.
+ */
+function buildObservationsQueryComponents(
   opts: PublicApiObservationsQuery,
   columnDefinitions: UiColumnMappings = eventsTableNativeUiColumnDefinitions,
-): EventsQueryBuilder {
+): {
+  queryBuilder: EventsQueryBuilder;
+  externalCTEs: Array<{
+    name: string;
+    queryWithParams: { query: string; params: Record<string, any> };
+  }>;
+} {
   const { projectId, advancedFilters, ...filterParams } = opts;
 
   // Convert and merge simple and advanced filters
@@ -765,14 +779,23 @@ function buildObservationsQueryBase(
   const startTimeFrom = extractTimeFilter(observationsFilter);
   const appliedFilter = observationsFilter.apply();
 
-  // Build query with common CTE, joins, and filters
+  // Build external CTEs
+  const externalCTEs: Array<{
+    name: string;
+    queryWithParams: { query: string; params: Record<string, any> };
+  }> = [];
+  if (hasTraceFilter) {
+    externalCTEs.push({
+      name: "traces",
+      queryWithParams: eventsTracesAggregation({
+        projectId,
+        startTimeFrom,
+      }).buildWithParams(),
+    });
+  }
+
+  // Build query with joins and filters (no CTEs)
   const queryBuilder = new EventsQueryBuilder({ projectId })
-    .when(hasTraceFilter, (b) =>
-      b.withCTE(
-        "traces",
-        eventsTracesAggregation({ projectId, startTimeFrom }).buildWithParams(),
-      ),
-    )
     .when(hasTraceFilter, (b) =>
       b.leftJoin(
         "traces t",
@@ -781,6 +804,20 @@ function buildObservationsQueryBase(
     )
     .where(appliedFilter);
 
+  return { queryBuilder, externalCTEs };
+}
+
+function buildObservationsQueryBase(
+  opts: PublicApiObservationsQuery,
+  columnDefinitions: UiColumnMappings = eventsTableNativeUiColumnDefinitions,
+): EventsQueryBuilder {
+  const { queryBuilder, externalCTEs } = buildObservationsQueryComponents(
+    opts,
+    columnDefinitions,
+  );
+  for (const cte of externalCTEs) {
+    queryBuilder.withCTE(cte.name, cte.queryWithParams);
+  }
   return queryBuilder;
 }
 
@@ -830,7 +867,7 @@ function applyCursorPagination(
 
 async function getObservationsRowsFromBuilder<T>(
   projectId: string,
-  queryBuilder: EventsQueryBuilder,
+  queryBuilder: QueryWithParams,
   operationName: string = "getObservationsFromEventsTableForPublicApi_rows",
 ): Promise<Array<T>> {
   const { query, params } = queryBuilder.buildWithParams();
@@ -935,56 +972,135 @@ export const getObservationsFromEventsTableForPublicApi = async (
  * V2 API: Get observations list from events table for public API
  * Returns partial observations based on requested field groups
  * Field filtering happens at query time in ClickHouse
+ *
+ * When IO or expanded metadata is requested, uses a CTE-based split query:
+ * - base CTE: filters/orders/limits on events_core (fast, truncated)
+ * - io CTE: fetches full IO/metadata from events_full for matched rows only
+ * This avoids expensive full-table scans on events_full.
  */
 export const getObservationsV2FromEventsTableForPublicApi = async (
   opts: PublicApiObservationsQuery & { fields: ObservationFieldGroup[] },
 ): Promise<Array<EventsObservationPublic>> => {
   const { projectId, expandMetadataKeys } = opts;
 
-  // Build query with filters and common CTEs
-  let queryBuilder = buildObservationsQueryBase(
-    opts,
-    eventsTableNativeUiColumnDefinitions,
-  );
-
   // Determine which field groups to include
-  // If fields are not specified (null), include "default" groups: core + basic
   const requestedFields = opts.fields ?? ["core", "basic"];
 
-  // Core fields are always included (required for cursor pagination)
-  queryBuilder.selectFieldSet("core");
+  const needsIO = requestedFields.includes("io");
+  const needsExpandedMetadata =
+    requestedFields.includes("metadata") &&
+    expandMetadataKeys != null &&
+    expandMetadataKeys.length > 0;
+  const needsIOCTE = needsIO || needsExpandedMetadata;
+  // Metadata goes to io CTE when in CTE mode and metadata is requested
+  const metadataFromFullTable =
+    needsIOCTE && requestedFields.includes("metadata");
 
-  // Conditionally add other field sets based on requested groups
+  // Shared: build base query with field sets, ordering, pagination
+  const { queryBuilder: baseBuilder, externalCTEs } =
+    buildObservationsQueryComponents(
+      opts,
+      eventsTableNativeUiColumnDefinitions,
+    );
+
+  baseBuilder.selectFieldSet("core");
+  const excludeFromBase = new Set<string>(["core", "io"]);
+  if (metadataFromFullTable) excludeFromBase.add("metadata");
   requestedFields
-    .filter((fg) => fg !== "core")
-    .forEach((fieldGroup) => {
-      queryBuilder.selectFieldSet(fieldGroup);
-    });
+    .filter((fg) => !excludeFromBase.has(fg))
+    .forEach((fg) => baseBuilder.selectFieldSet(fg));
 
-  // Handle metadata field with optional expansion
-  if (requestedFields.includes("metadata")) {
-    if (expandMetadataKeys && expandMetadataKeys.length > 0) {
-      // Use expanded metadata (coalesces truncated values with full values)
-      queryBuilder.selectMetadataExpanded(expandMetadataKeys);
+  applyOrderByForObservationsQuery(baseBuilder);
+  applyCursorPagination(opts, baseBuilder);
+
+  let builder: QueryWithParams;
+
+  if (!needsIOCTE) {
+    // Simple path: add CTEs back to the builder and use directly
+    for (const cte of externalCTEs) {
+      baseBuilder.withCTE(cte.name, cte.queryWithParams);
     }
+    builder = baseBuilder;
+  } else {
+    // CTE path: compose base + io from events_full using CTEQueryBuilder
+    const { query: baseQuery, params: baseParams } =
+      baseBuilder.buildWithParams();
+
+    // Build io CTE: fetch full IO/metadata from events_full for matched rows
+    const ioSelectParts = [
+      "e.span_id as id",
+      'e.trace_id as "trace_id"',
+      'e.start_time as "start_time"',
+    ];
+    if (needsIO) {
+      ioSelectParts.push("e.input", "e.output");
+    }
+    if (metadataFromFullTable) {
+      ioSelectParts.push(
+        "mapFromArrays(e.metadata_names, e.metadata_values) as metadata",
+      );
+    }
+    const ioQuery = [
+      `SELECT ${ioSelectParts.join(", ")}`,
+      "FROM events_full e",
+      "WHERE e.project_id = {projectId: String}",
+      'AND (e.start_time, e.trace_id, e.span_id) IN (SELECT "start_time", "trace_id", id FROM base)',
+    ].join("\n");
+
+    // Compose final query using CTEQueryBuilder
+    let cteBuilder = new CTEQueryBuilder();
+
+    // Register external CTEs (traces, etc.) — referenced inside base CTE via JOINs
+    for (const cte of externalCTEs) {
+      cteBuilder = cteBuilder.withCTE(cte.name, {
+        ...cte.queryWithParams,
+        schema: [] as string[],
+      });
+    }
+
+    // Register base and io CTEs, set up FROM and JOIN
+    cteBuilder = cteBuilder
+      .withCTE("base", {
+        query: baseQuery,
+        params: baseParams,
+        schema: [] as string[],
+      })
+      .withCTE("io", {
+        query: ioQuery,
+        params: { projectId },
+        schema: [] as string[],
+      })
+      .from("base", "b")
+      .leftJoin(
+        "io",
+        "i",
+        'ON b."start_time" = i."start_time" AND b."trace_id" = i."trace_id" AND b.id = i.id',
+      );
+
+    // SELECT: base.* + io columns
+    cteBuilder.select("b.*");
+    if (needsIO) cteBuilder.select("i.input", "i.output");
+    if (metadataFromFullTable) cteBuilder.select("i.metadata");
+
+    // ORDER BY duplicated for cursor pagination correctness
+    cteBuilder.orderBy(
+      'ORDER BY b."start_time" DESC, xxHash32(b."trace_id") DESC, b.id DESC',
+    );
+
+    builder = cteBuilder;
   }
 
-  queryBuilder = applyCursorPagination(
-    opts,
-    applyOrderByForObservationsQuery(queryBuilder),
-  );
-
-  const observationRecords =
+  const records =
     await getObservationsRowsFromBuilder<ObservationsTableQueryResultWitouhtTraceFields>(
       projectId,
-      queryBuilder,
+      builder,
     );
 
   return await enrichObservationsWithModelData(
-    observationRecords,
-    opts.projectId,
+    records,
+    projectId,
     Boolean(opts.parseIoAsJson),
-    opts.fields, // V2 API: field groups specified, return partial observations
+    opts.fields,
   );
 };
 
