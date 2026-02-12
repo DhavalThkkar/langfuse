@@ -8,6 +8,7 @@ import MessageResponse from "./interfaces/MessageResponse";
 
 require("dotenv").config();
 
+import { Queue } from "bullmq";
 import {
   evalJobCreatorQueueProcessor,
   evalJobDatasetCreatorQueueProcessor,
@@ -27,7 +28,9 @@ import {
   DataRetentionQueue,
   MeteringDataPostgresExportQueue,
   PostHogIntegrationQueue,
+  PostHogIntegrationProcessingQueue,
   MixpanelIntegrationQueue,
+  MixpanelIntegrationProcessingQueue,
   QueueName,
   logger,
   BlobStorageIntegrationQueue,
@@ -389,6 +392,42 @@ if (env.QUEUE_CONSUMER_EXPERIMENT_CREATE_QUEUE_IS_ENABLED === "true") {
     {
       concurrency: env.LANGFUSE_EXPERIMENT_CREATOR_WORKER_CONCURRENCY,
     },
+  );
+}
+
+// One-time migration: remove jobs with the old hourly-key jobId format
+// (e.g. "<projectId>--2026-02-11T08") from integration processing queues.
+// Can be removed once all deployments have run this code.
+const removeLegacyHourlyKeyJobs = async (queue: Queue, label: string) => {
+  const hourlyKeyPattern = /\d{4}-\d{2}-\d{2}T\d{2}$/;
+  const [waiting, failed, active, delayed] = await Promise.all([
+    queue.getWaiting(0, 1000),
+    queue.getFailed(0, 1000),
+    queue.getActive(0, 1000),
+    queue.getDelayed(0, 1000),
+  ]);
+  const legacyJobs = [...waiting, ...failed, ...active, ...delayed].filter(
+    (job) => job.id && hourlyKeyPattern.test(job.id),
+  );
+  if (legacyJobs.length > 0) {
+    logger.info(
+      `[${label}] Removing ${legacyJobs.length} legacy hourly-key jobs`,
+    );
+    await Promise.all(legacyJobs.map((job) => job.remove()));
+  }
+};
+
+const posthogProcessingQueue = PostHogIntegrationProcessingQueue.getInstance();
+if (posthogProcessingQueue) {
+  removeLegacyHourlyKeyJobs(posthogProcessingQueue, "POSTHOG").catch((err) =>
+    logger.error("[POSTHOG] Error cleaning up legacy jobs", err),
+  );
+}
+const mixpanelProcessingQueue =
+  MixpanelIntegrationProcessingQueue.getInstance();
+if (mixpanelProcessingQueue) {
+  removeLegacyHourlyKeyJobs(mixpanelProcessingQueue, "MIXPANEL").catch((err) =>
+    logger.error("[MIXPANEL] Error cleaning up legacy jobs", err),
   );
 }
 
