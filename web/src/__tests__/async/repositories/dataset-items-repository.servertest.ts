@@ -1724,10 +1724,9 @@ describe("Dataset Items Repository - Versioning Tests", () => {
       // Search for keyword that only exists in expected output
       const searchResults = await getDatasetItems({
         projectId,
-        datasetId,
+        filterState: createDatasetItemFilterState({ datasetIds: [datasetId] }),
         limit: 100,
-        offset: 0,
-        filter: [],
+        page: 0,
         searchQuery: "unique_output_search_keyword",
         searchType: ["output"], // Search only in expected output
       });
