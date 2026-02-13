@@ -63,7 +63,9 @@ import {
   EventsQueryBuilder,
   CTEQueryBuilder,
   EventsAggQueryBuilder,
+  buildEventsFullTableSplitQuery,
   type QueryWithParams,
+  OrderByEntry,
 } from "../queries/clickhouse-sql/event-query-builder";
 import { type EventsObservationPublic } from "../queries/createGenerationsQuery";
 import { UiColumnMappings } from "../../tableDefinitions";
@@ -823,18 +825,23 @@ function buildObservationsQueryBase(
   return queryBuilder;
 }
 
+function orderByForObservationsQuery(
+  prefix: string = "e",
+  span_id: string = "span_id",
+): OrderByEntry[] {
+  // Order by to cursor ordering.
+  // project_id and potentially other prefixes are injected in the query builder when necessary
+  return [
+    { column: `${prefix}.start_time`, direction: "DESC" as const },
+    { column: `xxHash32(${prefix}.trace_id)`, direction: "DESC" as const },
+    { column: `${prefix}.${span_id}`, direction: "DESC" as const },
+  ];
+}
+
 function applyOrderByForObservationsQuery(
   queryBuilder: EventsQueryBuilder,
 ): EventsQueryBuilder {
-  return (
-    queryBuilder
-      // Order by to match table ordering
-      .orderByColumns([
-        { column: "e.start_time", direction: "DESC" },
-        { column: "xxHash32(e.trace_id)", direction: "DESC" },
-        { column: "e.span_id", direction: "DESC" },
-      ])
-  );
+  return queryBuilder.orderByColumns(orderByForObservationsQuery("e"));
 }
 
 function applyOffsetPagination(
@@ -1024,72 +1031,13 @@ export const getObservationsV2FromEventsTableForPublicApi = async (
     }
     builder = baseBuilder;
   } else {
-    // CTE path: compose base + io from events_full using CTEQueryBuilder
-    const { query: baseQuery, params: baseParams } =
-      baseBuilder.buildWithParams();
-
-    // Build io CTE: fetch full IO/metadata from events_full for matched rows
-    const ioSelectParts = [
-      "e.span_id as id",
-      'e.trace_id as "trace_id"',
-      'e.start_time as "start_time"',
-    ];
-    if (needsIO) {
-      ioSelectParts.push("e.input", "e.output");
-    }
-    if (metadataFromFullTable) {
-      ioSelectParts.push(
-        "mapFromArrays(e.metadata_names, e.metadata_values) as metadata",
-      );
-    }
-    const ioQuery = [
-      `SELECT ${ioSelectParts.join(", ")}`,
-      "FROM events_full e",
-      "WHERE e.project_id = {projectId: String}",
-      'AND (e.start_time, e.trace_id, e.span_id) IN (SELECT "start_time", "trace_id", id FROM base)',
-    ].join("\n");
-
-    // Compose final query using CTEQueryBuilder
-    let cteBuilder = new CTEQueryBuilder();
-
-    // Register external CTEs (traces, etc.) — referenced inside base CTE via JOINs
-    for (const cte of externalCTEs) {
-      cteBuilder = cteBuilder.withCTE(cte.name, {
-        ...cte.queryWithParams,
-        schema: [] as string[],
-      });
-    }
-
-    // Register base and io CTEs, set up FROM and JOIN
-    cteBuilder = cteBuilder
-      .withCTE("base", {
-        query: baseQuery,
-        params: baseParams,
-        schema: [] as string[],
-      })
-      .withCTE("io", {
-        query: ioQuery,
-        params: { projectId },
-        schema: [] as string[],
-      })
-      .from("base", "b")
-      .leftJoin(
-        "io",
-        "i",
-        'ON b."start_time" = i."start_time" AND b."trace_id" = i."trace_id" AND b.id = i.id',
-      );
-
-    // SELECT: base.* + io columns
-    cteBuilder.select("b.*");
-    if (needsIO) cteBuilder.select("i.input", "i.output");
-    if (metadataFromFullTable) cteBuilder.select("i.metadata");
-
-    // ORDER BY duplicated for cursor pagination correctness
-    cteBuilder.orderBy(
-      'ORDER BY b."start_time" DESC, xxHash32(b."trace_id") DESC, b.id DESC',
-    );
-
-    builder = cteBuilder;
+    builder = buildEventsFullTableSplitQuery({
+      projectId,
+      baseBuilder,
+      includeIO: needsIO,
+      includeMetadata: metadataFromFullTable,
+      externalCTEs,
+    }).orderByColumns(orderByForObservationsQuery("b", "id"));
   }
 
   const records =

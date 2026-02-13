@@ -1,10 +1,42 @@
 import { OBSERVATIONS_TO_TRACE_INTERVAL } from "../../repositories/constants";
 
 /**
+ * Extract the output column alias from a field expression (unquoted).
+ * E.g. "e.span_id as id" → "id", 'e.trace_id as "trace_id"' → "trace_id"
+ */
+function extractAlias(expr: string): string {
+  const asMatch = expr.match(/\bas\s+"?([\w]+)"?\s*$/i);
+  if (asMatch) return asMatch[1];
+  // No alias: use the expression after the last dot (e.g. "e.input" → "input")
+  const dotIdx = expr.lastIndexOf(".");
+  return dotIdx >= 0 ? expr.slice(dotIdx + 1) : expr;
+}
+
+/**
  * Any query builder that can produce a final query string with parameters.
  */
 export interface QueryWithParams {
   buildWithParams(): { query: string; params: Record<string, any> };
+}
+
+/**
+ * Builder returned by buildEventsFullTableSplitQuery.
+ * Wraps CTEQueryBuilder with a simpler interface (no complex generics).
+ * Callers can chain additional CTEs, JOINs, SELECTs, and ORDER BY.
+ */
+export interface SplitQueryBuilder extends QueryWithParams {
+  withCTE(
+    name: string,
+    cteWithSchema: {
+      query: string;
+      params: Record<string, any>;
+      schema?: string[];
+    },
+  ): SplitQueryBuilder;
+  leftJoin(cteName: string, alias: string, onClause: string): SplitQueryBuilder;
+  select(...expressions: string[]): SplitQueryBuilder;
+  orderBy(clause: string): SplitQueryBuilder;
+  orderByColumns(entries: OrderByEntry[]): SplitQueryBuilder;
 }
 
 /**
@@ -346,6 +378,19 @@ abstract class AbstractQueryBuilder {
     if (clause.trim()) {
       this.orderByClause = clause;
     }
+    return this;
+  }
+
+  /**
+   * Add ORDER BY using OrderByEntry array for structured API
+   */
+  orderByColumns(entries: OrderByEntry[]): this {
+    if (!entries.length) {
+      return this;
+    }
+
+    const columns: string[] = entries.map((e) => `${e.column} ${e.direction}`);
+    this.orderByClause = `ORDER BY ${columns.join(", ")}`;
     return this;
   }
 
@@ -793,6 +838,20 @@ export class EventsQueryBuilder extends BaseEventsQueryBuilder<
   }
 
   /**
+   * Get the output column aliases for the currently selected fields.
+   * Used by buildEventsFullTableSplitQuery to construct explicit column
+   * references instead of b.* (which breaks in ClickHouse JOINs when
+   * joined CTEs have overlapping column names).
+   */
+  getSelectedAliases(): string[] {
+    return [...this.selectFields].flatMap((fieldKey) => {
+      const expr = EVENTS_FIELDS[fieldKey as keyof typeof EVENTS_FIELDS];
+      if (!expr) return [];
+      return [extractAlias(expr)];
+    });
+  }
+
+  /**
    * Get table name based on data requirements.
    * Uses events_full when full I/O or metadata expansion is needed.
    */
@@ -1200,4 +1259,96 @@ export class EventsAggQueryBuilder extends AbstractCTEQueryBuilder {
 
     return parts.join("\n");
   }
+}
+
+/**
+ * Build a CTE-based split query: filter/order on events_core, then fetch
+ * IO and/or metadata from events_full only for matched rows.
+ *
+ * Returns a SplitQueryBuilder that callers can chain onto for additional
+ * CTEs, JOINs, SELECTs, and ORDER BY.
+ *
+ * @example
+ * buildEventsFullTableSplitQuery({ projectId, baseBuilder, includeIO: true, includeMetadata: true })
+ *   .withCTE("scores_agg", { ...eventsScoresAggregation({ projectId }), schema: [] })
+ *   .leftJoin("scores_agg", "s", "ON s.trace_id = b.trace_id AND s.observation_id = b.id")
+ *   .select("s.scores_avg as scores_avg", "s.score_categories as score_categories")
+ *   .orderBy("ORDER BY b.start_time DESC");
+ */
+export function buildEventsFullTableSplitQuery(opts: {
+  projectId: string;
+  baseBuilder: EventsQueryBuilder;
+  includeIO: boolean;
+  includeMetadata: boolean;
+  externalCTEs?: Array<{
+    name: string;
+    queryWithParams: { query: string; params: Record<string, any> };
+  }>;
+}): SplitQueryBuilder {
+  const { query: baseQuery, params: baseParams } =
+    opts.baseBuilder.buildWithParams();
+
+  // Build IO CTE: fetch full IO/metadata from events_full for matched rows.
+  // Join key columns use _io_ prefix to avoid name clashes with base CTE
+  // (ClickHouse excludes duplicate column names from b.* in JOINs).
+  const ioSelectParts = [
+    "e.span_id as _io_id",
+    'e.trace_id as "_io_trace_id"',
+    'e.start_time as "_io_start_time"',
+  ];
+  if (opts.includeIO) {
+    ioSelectParts.push("e.input", "e.output");
+  }
+  if (opts.includeMetadata) {
+    ioSelectParts.push(
+      "mapFromArrays(e.metadata_names, e.metadata_values) as metadata",
+    );
+  }
+  const ioQuery = [
+    `SELECT ${ioSelectParts.join(", ")}`,
+    "FROM events_full e",
+    "WHERE e.project_id = {projectId: String}",
+    'AND (e.start_time, e.trace_id, e.span_id) IN (SELECT "start_time", "trace_id", id FROM base)',
+  ].join("\n");
+
+  // Compose final query using CTEQueryBuilder
+  let cteBuilder = new CTEQueryBuilder();
+
+  // Register external CTEs (referenced inside base query via JOINs)
+  for (const cte of opts.externalCTEs ?? []) {
+    cteBuilder = cteBuilder.withCTE(cte.name, {
+      ...cte.queryWithParams,
+      schema: [] as string[],
+    });
+  }
+
+  // Register base and io CTEs, set up FROM and JOIN
+  cteBuilder = cteBuilder
+    .withCTE("base", {
+      query: baseQuery,
+      params: baseParams,
+      schema: [] as string[],
+    })
+    .withCTE("io", {
+      query: ioQuery,
+      params: { projectId: opts.projectId },
+      schema: [] as string[],
+    })
+    .from("base", "b")
+    .leftJoin(
+      "io",
+      "i",
+      'ON b."start_time" = i."_io_start_time" AND b."trace_id" = i."_io_trace_id" AND b.id = i._io_id',
+    );
+
+  // SELECT: explicit base columns (not b.* — ClickHouse excludes columns
+  // from b.* that share names with joined CTEs, and b.col produces JSON
+  // keys with the table prefix). Use "b.col as col" for clean JSON keys.
+  const baseAliases = opts.baseBuilder.getSelectedAliases();
+  cteBuilder.select(...baseAliases.map((a) => `b.${a} as ${a}`));
+  if (opts.includeIO)
+    cteBuilder.select("i.input as input", "i.output as output");
+  if (opts.includeMetadata) cteBuilder.select("i.metadata as metadata");
+
+  return cteBuilder as unknown as SplitQueryBuilder;
 }
