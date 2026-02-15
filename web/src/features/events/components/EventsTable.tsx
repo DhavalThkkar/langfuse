@@ -560,7 +560,7 @@ export default function ObservationsEventsTable({
       },
     },
     {
-      id: ActionId.ObservationRunEvaluation,
+      id: ActionId.ObservationBatchEvaluation,
       type: BatchActionType.Create,
       label: "Run Evaluation",
       description: "Run an evaluation on selected observations.",
@@ -1317,7 +1317,7 @@ export default function ObservationsEventsTable({
                   actions={tableActions}
                   tableName={BatchExportTableName.Observations}
                   onCustomAction={(actionType) => {
-                    if (actionType === ActionId.ObservationRunEvaluation) {
+                    if (actionType === ActionId.ObservationBatchEvaluation) {
                       setShowRunEvaluationDialog(true);
                     }
                   }}
