@@ -345,7 +345,7 @@ export function DataTableToolbar<TData, TValue>({
                           {(searchConfig.availableSearchTypes === undefined ||
                             searchConfig.availableSearchTypes.content) && (
                             <DropdownMenuRadioItem value="metadata_fulltext">
-                              Content
+                              Input/Output
                             </DropdownMenuRadioItem>
                           )}
                           {(searchConfig.availableSearchTypes === undefined ||
