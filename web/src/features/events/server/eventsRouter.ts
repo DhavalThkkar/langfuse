@@ -22,7 +22,10 @@ import {
   getScoresAndCorrectionsForTraces,
   convertDateToClickhouseDateTime,
   getAgentGraphDataFromEventsTable,
+  getObservationsForTraceFromEventsTable,
+  MAX_OBSERVATIONS_PER_TRACE,
 } from "@langfuse/shared/src/server";
+import { TRPCError } from "@trpc/server";
 import {
   AgentGraphDataSchema,
   type AgentGraphDataResponse,
@@ -173,6 +176,44 @@ export const eventsRouter = createTRPCRouter({
             traceIds: [input.traceId],
             timestamp: input.timestamp,
           });
+        },
+      );
+    }),
+  /**
+   * Fetch all observations for a trace from the events table.
+   * returns up to MAX_OBSERVATIONS_PER_TRACE observations.
+   * Throws BAD_REQUEST if trace exceeds the cap.
+   */
+  byTraceId: protectedProjectProcedure
+    .input(
+      zodSchema.object({
+        projectId: zodSchema.string(),
+        traceId: zodSchema.string(),
+        timestamp: zodSchema.date().optional(),
+      }),
+    )
+    .query(async ({ input, ctx }) => {
+      return instrumentAsync(
+        { name: "get-events-by-trace-id-trpc" },
+        async (span) => {
+          span.setAttribute("project_id", ctx.session.projectId);
+          span.setAttribute("trace_id", input.traceId);
+
+          const { observations, totalCount } =
+            await getObservationsForTraceFromEventsTable({
+              projectId: ctx.session.projectId,
+              traceId: input.traceId,
+              timestamp: input.timestamp,
+            });
+
+          if (totalCount > MAX_OBSERVATIONS_PER_TRACE) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: `Trace has ${totalCount} observations, exceeding the maximum of ${MAX_OBSERVATIONS_PER_TRACE} for the trace detail view.`,
+            });
+          }
+
+          return { observations };
         },
       );
     }),

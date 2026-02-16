@@ -92,6 +92,23 @@ export function TracePage({
       />
     );
 
+  // show backend error to user if present (e.g., too many observations)
+  if (isBetaEnabled && !eventsData.isLoading && eventsData.error) {
+    const message =
+      (eventsData.error as { message?: string })?.message ??
+      "An error occurred loading this trace.";
+    return (
+      <ErrorPage
+        title="Error loading trace"
+        message={message}
+        additionalButton={{
+          label: "Retry",
+          onClick: () => void window.location.reload(),
+        }}
+      />
+    );
+  }
+
   // For events path: show not found if no observations found after loading
   if (isBetaEnabled && !eventsData.isLoading && !eventsData.data)
     return (

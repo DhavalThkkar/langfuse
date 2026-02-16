@@ -49,6 +49,7 @@ import {
   queryClickhouse,
   queryClickhouseStream,
 } from "./clickhouse";
+import { TRACE_TO_OBSERVATIONS_INTERVAL } from "./constants";
 import { ObservationRecordReadType, TraceRecordReadType } from "./definitions";
 import type { AnalyticsObservationEvent } from "../analytics-integrations/types";
 import {
@@ -282,6 +283,71 @@ const TRACES_ORDER_BY_COLUMNS = TRACES_FROM_EVENTS_UI_COLUMN_DEFINITIONS.filter(
     col.uiTableId === "timestamp" ? "timestamp" : col.clickhouseSelect,
   queryPrefix: "t", // Use 't' prefix because we're selecting from traces CTE
 }));
+
+// TODO: remove limit?
+export const MAX_OBSERVATIONS_PER_TRACE = 10_000;
+
+export const getObservationsForTraceFromEventsTable = async (params: {
+  projectId: string;
+  traceId: string;
+  timestamp?: Date;
+}): Promise<{ observations: FullEventsObservations; totalCount: number }> => {
+  const { projectId, traceId, timestamp } = params;
+
+  const queryBuilder = new EventsQueryBuilder({ projectId })
+    .selectFieldSet("base", "calculated")
+    .whereRaw(
+      "trace_id = {traceId: String} AND xxHash32(trace_id) = xxHash32({traceIdHash: String})",
+      { traceId, traceIdHash: traceId },
+    )
+    .when(Boolean(timestamp), (b) =>
+      b.whereRaw(
+        `start_time >= {traceTimestamp: DateTime64(3)} - ${TRACE_TO_OBSERVATIONS_INTERVAL}`,
+        {
+          traceTimestamp: convertDateToClickhouseDateTime(timestamp!),
+        },
+      ),
+    )
+    .orderByColumns([{ column: "e.start_time", direction: "ASC" }])
+    .limit(MAX_OBSERVATIONS_PER_TRACE + 1, 0);
+
+  const { query, params: queryParams } = queryBuilder.buildWithParams();
+
+  const records = await measureAndReturn({
+    operationName: "getObservationsForTraceFromEventsTable",
+    projectId,
+    input: {
+      params: queryParams,
+      tags: {
+        feature: "tracing",
+        type: "events",
+        kind: "byTraceId",
+        projectId,
+      },
+    },
+    fn: async (input) => {
+      return queryClickhouse<ObservationsTableQueryResultWitouhtTraceFields>({
+        query,
+        params: input.params,
+        tags: input.tags,
+        preferredClickhouseService: "EventsReadOnly",
+      });
+    },
+  });
+
+  const totalCount = records.length;
+
+  const withModelData = await enrichObservationsWithModelData(
+    records.slice(0, MAX_OBSERVATIONS_PER_TRACE),
+    projectId,
+    false,
+    null,
+  );
+
+  const observations = await enrichObservationsWithTraceFields(withModelData);
+
+  return { observations, totalCount };
+};
 
 export const getObservationsCountFromEventsTable = async (
   opts: ObservationTableQuery,
