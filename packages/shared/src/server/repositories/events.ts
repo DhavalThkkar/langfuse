@@ -49,7 +49,6 @@ import {
   queryClickhouse,
   queryClickhouseStream,
 } from "./clickhouse";
-import { TRACE_TO_OBSERVATIONS_INTERVAL } from "./constants";
 import { ObservationRecordReadType, TraceRecordReadType } from "./definitions";
 import type { AnalyticsObservationEvent } from "../analytics-integrations/types";
 import {
@@ -294,46 +293,37 @@ export const getObservationsForTraceFromEventsTable = async (params: {
 }): Promise<{ observations: FullEventsObservations; totalCount: number }> => {
   const { projectId, traceId, timestamp } = params;
 
-  const queryBuilder = new EventsQueryBuilder({ projectId })
-    .selectFieldSet("base", "calculated")
-    .whereRaw(
-      "trace_id = {traceId: String} AND xxHash32(trace_id) = xxHash32({traceIdHash: String})",
-      { traceId, traceIdHash: traceId },
-    )
-    .when(Boolean(timestamp), (b) =>
-      b.whereRaw(
-        `start_time >= {traceTimestamp: DateTime64(3)} - ${TRACE_TO_OBSERVATIONS_INTERVAL}`,
-        {
-          traceTimestamp: convertDateToClickhouseDateTime(timestamp!),
-        },
-      ),
-    )
-    .orderByColumns([{ column: "e.start_time", direction: "ASC" }])
-    .limit(MAX_OBSERVATIONS_PER_TRACE + 1, 0);
+  const filter: FilterState = [
+    {
+      column: "traceId",
+      operator: "=" as const,
+      value: traceId,
+      type: "string" as const,
+    },
+  ];
 
-  const { query, params: queryParams } = queryBuilder.buildWithParams();
+  if (timestamp) {
+    filter.push({
+      column: "startTime",
+      operator: ">=" as const,
+      // Equivalent to TRACE_TO_OBSERVATIONS_INTERVAL (INTERVAL 1 HOUR)
+      value: new Date(timestamp.getTime() - 60 * 60 * 1000),
+      type: "datetime" as const,
+    });
+  }
 
-  const records = await measureAndReturn({
-    operationName: "getObservationsForTraceFromEventsTable",
-    projectId,
-    input: {
-      params: queryParams,
-      tags: {
-        feature: "tracing",
-        type: "events",
-        kind: "byTraceId",
+  const records =
+    await getObservationsFromEventsTableInternal<ObservationsTableQueryResultWitouhtTraceFields>(
+      {
         projectId,
+        filter,
+        orderBy: { column: "startTime", order: "ASC" },
+        limit: MAX_OBSERVATIONS_PER_TRACE + 1,
+        offset: 0,
+        select: "rows",
+        tags: { kind: "byTraceId" },
       },
-    },
-    fn: async (input) => {
-      return queryClickhouse<ObservationsTableQueryResultWitouhtTraceFields>({
-        query,
-        params: input.params,
-        tags: input.tags,
-        preferredClickhouseService: "EventsReadOnly",
-      });
-    },
-  });
+    );
 
   const totalCount = records.length;
 
@@ -343,7 +333,6 @@ export const getObservationsForTraceFromEventsTable = async (params: {
     false,
     null,
   );
-
   const observations = await enrichObservationsWithTraceFields(withModelData);
 
   return { observations, totalCount };
@@ -412,7 +401,6 @@ async function getObservationsFromEventsTableInternal<T>(
   const hasScoresFilter = filter.some((f) =>
     f.column.toLowerCase().includes("score"),
   );
-  const appliedObservationsFilter = observationsFilter.apply();
   const search = clickhouseSearchCondition(
     opts.searchQuery,
     opts.searchType,
@@ -469,7 +457,7 @@ async function getObservationsFromEventsTableInternal<T>(
     .when(hasScoresFilter, (b) =>
       b.leftJoin("scores_agg AS s", "ON s.observation_id = e.span_id"),
     )
-    .where(appliedObservationsFilter)
+    .applyFilters(observationsFilter)
     .where(search)
     .when(orderByEntries.length > 0, (b) => b.orderByColumns(orderByEntries))
     .limit(limit, offset);
@@ -496,6 +484,7 @@ async function getObservationsFromEventsTableInternal<T>(
         params: input.params,
         tags: input.tags,
         clickhouseConfigs,
+        preferredClickhouseService: "EventsReadOnly",
       });
     },
   });
