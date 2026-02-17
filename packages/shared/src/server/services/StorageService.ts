@@ -14,7 +14,10 @@ import {
   BlobServiceClient,
   ContainerClient,
   StorageSharedKeyCredential,
+  generateBlobSASQueryParameters,
+  SASProtocol,
 } from "@azure/storage-blob";
+import { DefaultAzureCredential } from "@azure/identity";
 import { Storage, Bucket, GetSignedUrlConfig } from "@google-cloud/storage";
 import { logger } from "../logger";
 import { env } from "../../env";
@@ -143,10 +146,35 @@ export class StorageServiceFactory {
 }
 
 let azureContainersExists: Record<string, boolean> = {};
+
+/** Cache for user delegation key (AD auth). Key max 7 days; we cache for 30 min. */
+const delegationKeyCache: Map<
+  string,
+  {
+    key: Awaited<ReturnType<BlobServiceClient["getUserDelegationKey"]>>;
+    expiresAt: number;
+  }
+> = new Map();
+const DELEGATION_KEY_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const DELEGATION_KEY_VALIDITY_MS = 60 * 60 * 1000; // 1 hour
+const SAS_STARTS_ON_SKEW_MS = 15 * 60 * 1000; // 15 minutes in the past for clock skew
+
+function getAccountNameFromEndpoint(endpoint: string): string {
+  try {
+    const hostname = new URL(endpoint).hostname;
+    return hostname.split(".")[0] ?? "";
+  } catch {
+    return "";
+  }
+}
+
 class AzureBlobStorageService implements StorageService {
   private client: ContainerClient;
+  private blobServiceClient: BlobServiceClient;
   private container: string;
   private externalEndpoint: string | undefined;
+  private useAdAuth: boolean;
+  private accountName: string;
 
   constructor(params: {
     accessKeyId: string | undefined;
@@ -158,23 +186,33 @@ class AzureBlobStorageService implements StorageService {
     forcePathStyle: boolean;
   }) {
     const { accessKeyId, secretAccessKey, endpoint, externalEndpoint } = params;
-    if (!accessKeyId || !secretAccessKey || !endpoint) {
-      throw new Error(
-        `Endpoint, account and account key must be configured to use Azure Blob Storage`,
-      );
+    if (!endpoint) {
+      throw new Error(`Endpoint must be configured to use Azure Blob Storage`);
     }
 
     this.externalEndpoint = externalEndpoint;
-    const sharedKeyCredential = new StorageSharedKeyCredential(
-      accessKeyId,
-      secretAccessKey,
-    );
-    const blobServiceClient = new BlobServiceClient(
-      endpoint,
-      sharedKeyCredential,
-    );
     this.container = params.bucketName;
-    this.client = blobServiceClient.getContainerClient(this.container);
+    this.accountName = getAccountNameFromEndpoint(endpoint);
+
+    if (accessKeyId && secretAccessKey) {
+      this.useAdAuth = false;
+      const sharedKeyCredential = new StorageSharedKeyCredential(
+        accessKeyId,
+        secretAccessKey,
+      );
+      this.blobServiceClient = new BlobServiceClient(
+        endpoint,
+        sharedKeyCredential,
+      );
+    } else {
+      this.useAdAuth = true;
+      this.blobServiceClient = new BlobServiceClient(
+        endpoint,
+        new DefaultAzureCredential(),
+      );
+    }
+
+    this.client = this.blobServiceClient.getContainerClient(this.container);
   }
 
   private async createContainerIfNotExists(): Promise<void> {
@@ -197,6 +235,29 @@ class AzureBlobStorageService implements StorageService {
       );
       handleStorageError(err, "create Azure Blob Storage container");
     }
+  }
+
+  /** Get user delegation key for AD auth; cached for 30 minutes. */
+  private async getUserDelegationKeyCached(): Promise<
+    Awaited<ReturnType<BlobServiceClient["getUserDelegationKey"]>>
+  > {
+    const cacheKey = `${this.accountName}:${this.container}`;
+    const cached = delegationKeyCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.key;
+    }
+    const now = Date.now();
+    const startsOn = new Date(now - SAS_STARTS_ON_SKEW_MS);
+    const expiresOn = new Date(now + DELEGATION_KEY_VALIDITY_MS);
+    const key = await this.blobServiceClient.getUserDelegationKey(
+      startsOn,
+      expiresOn,
+    );
+    delegationKeyCache.set(cacheKey, {
+      key,
+      expiresAt: now + DELEGATION_KEY_CACHE_TTL_MS,
+    });
+    return key;
   }
 
   public async uploadFile(params: UploadFile): Promise<void> {
@@ -364,13 +425,39 @@ class AzureBlobStorageService implements StorageService {
       await this.createContainerIfNotExists();
 
       const blockBlobClient = this.client.getBlockBlobClient(fileName);
-      let url = await blockBlobClient.generateSasUrl({
-        permissions: BlobSASPermissions.parse("r"),
-        expiresOn: new Date(Date.now() + ttlSeconds * 1000),
-        contentDisposition: asAttachment
-          ? `attachment; filename="${fileName}"`
-          : undefined,
-      });
+      const now = Date.now();
+      const startsOn = new Date(now - SAS_STARTS_ON_SKEW_MS);
+      const expiresOn = new Date(now + ttlSeconds * 1000);
+
+      let url: string;
+      if (this.useAdAuth) {
+        const userDelegationKey = await this.getUserDelegationKeyCached();
+        const sasParams = generateBlobSASQueryParameters(
+          {
+            containerName: this.container,
+            blobName: fileName,
+            permissions: BlobSASPermissions.parse("r"),
+            protocol: SASProtocol.Https,
+            startsOn,
+            expiresOn,
+            contentDisposition: asAttachment
+              ? `attachment; filename="${fileName}"`
+              : undefined,
+          },
+          userDelegationKey,
+          this.accountName,
+        );
+        url = `${blockBlobClient.url}?${sasParams.toString()}`;
+      } else {
+        url = await blockBlobClient.generateSasUrl({
+          permissions: BlobSASPermissions.parse("r"),
+          startsOn,
+          expiresOn,
+          contentDisposition: asAttachment
+            ? `attachment; filename="${fileName}"`
+            : undefined,
+        });
+      }
 
       // Replace internal endpoint with external endpoint if configured
       if (this.externalEndpoint && url.includes(this.client.url)) {
@@ -399,11 +486,35 @@ class AzureBlobStorageService implements StorageService {
       await this.createContainerIfNotExists();
 
       const blockBlobClient = this.client.getBlockBlobClient(path);
-      let url = await blockBlobClient.generateSasUrl({
-        permissions: BlobSASPermissions.parse("w"),
-        expiresOn: new Date(Date.now() + ttlSeconds * 1000),
-        contentType: contentType,
-      });
+      const now = Date.now();
+      const startsOn = new Date(now - SAS_STARTS_ON_SKEW_MS);
+      const expiresOn = new Date(now + ttlSeconds * 1000);
+
+      let url: string;
+      if (this.useAdAuth) {
+        const userDelegationKey = await this.getUserDelegationKeyCached();
+        const sasParams = generateBlobSASQueryParameters(
+          {
+            containerName: this.container,
+            blobName: path,
+            permissions: BlobSASPermissions.parse("w"),
+            protocol: SASProtocol.Https,
+            startsOn,
+            expiresOn,
+            contentType,
+          },
+          userDelegationKey,
+          this.accountName,
+        );
+        url = `${blockBlobClient.url}?${sasParams.toString()}`;
+      } else {
+        url = await blockBlobClient.generateSasUrl({
+          permissions: BlobSASPermissions.parse("w"),
+          startsOn,
+          expiresOn,
+          contentType: contentType,
+        });
+      }
 
       // Replace internal endpoint with external endpoint if configured
       if (this.externalEndpoint && url.includes(this.client.url)) {

@@ -1,0 +1,147 @@
+# Langfuse Helm values for AKS with SPN-only auth (Workload Identity + Azure AD SSO).
+#
+# HOW TO USE:
+# 1. Run aks-create-resources.sh — it prints IDENTITY_CLIENT_ID, ACR_NAME, STORAGE_ACCOUNT, BLOB_CONTAINER.
+# 2. Copy this file to values.yaml.
+# 3. Run the sed block below to substitute all placeholders automatically:
+#
+#    cp docs/tasks/aks-helm-values.example.yaml values.yaml
+#    sed -i \
+#      -e "s|<IDENTITY_CLIENT_ID>|$IDENTITY_CLIENT_ID|g" \
+#      -e "s|<ACR_NAME>|$ACR_NAME|g" \
+#      -e "s|<STORAGE_ACCOUNT>|$STORAGE_ACCOUNT|g" \
+#      -e "s|<BLOB_CONTAINER>|$BLOB_CONTAINER|g" \
+#      -e "s|<YOUR_TENANT_ID>|$YOUR_TENANT_ID|g" \
+#      -e "s|<LANGFUSE_PUBLIC_URL>|${LANGFUSE_PUBLIC_URL:-http://localhost:3000}|g" \
+#      -e "s|<DB_PASSWORD>|$(openssl rand -hex 16)|g" \
+#      -e "s|<REDIS_PASSWORD>|$(openssl rand -hex 16)|g" \
+#      -e "s|<CH_PASSWORD>|$(openssl rand -hex 16)|g" \
+#      values.yaml
+#    Optional: set LANGFUSE_PUBLIC_URL before sed (Front Door or enterprise-allocated domain).
+#
+# 4. Public URL (nextauth.url) — editable; used for OAuth and Azure AD redirect URI:
+#    - Script default (if LANGFUSE_PUBLIC_URL unset): http://localhost:3000 (port-forward only).
+#    - Front Door: set LANGFUSE_PUBLIC_URL=https://your-profile.azurefd.net before sed, or replace <LANGFUSE_PUBLIC_URL> manually.
+#    - Enterprise-allocated domain: your team can input or autogenerate a hostname and set it here (or via LANGFUSE_PUBLIC_URL).
+#    This MUST exactly match the URL users open and the redirect URI base in your Azure AD App Registration.
+#    Optional sed: -e "s|<LANGFUSE_PUBLIC_URL>|${LANGFUSE_PUBLIC_URL:-http://localhost:3000}|g"
+#
+# 5. Set YOUR_TENANT_ID env var before running sed:
+#    export YOUR_TENANT_ID=$(az account show --query tenantId -o tsv)
+
+langfuse:
+  serviceAccount:
+    create: true
+    annotations:
+      azure.workload.identity/client-id: "<IDENTITY_CLIENT_ID>"
+
+  pod:
+    labels:
+      azure.workload.identity/use: "true"
+
+  salt:
+    secretKeyRef:
+      name: langfuse-secrets
+      key: salt
+  nextauth:
+    # Editable public URL — script substitutes <LANGFUSE_PUBLIC_URL> (default: http://localhost:3000).
+    # Replace with your Front Door hostname (https://xxx.azurefd.net), enterprise-allocated domain (https://langfuse.team.com), or keep for port-forward.
+    # MUST match the URL users open and the Azure AD redirect URI base (e.g. .../api/auth/callback/azure-ad).
+    url: "<LANGFUSE_PUBLIC_URL>"
+    secret:
+      secretKeyRef:
+        name: langfuse-secrets
+        key: nextauth-secret
+  encryptionKey:
+    secretKeyRef:
+      name: langfuse-secrets
+      key: encryption-key
+
+  web:
+    image:
+      repository: "<ACR_NAME>.azurecr.io/langfuse-web"
+      tag: "v1"
+    # Optional: expose web with a public IP (for Front Door or direct access). Omit to keep ClusterIP (port-forward only).
+    # When using Front Door or an enterprise-allocated domain, enable this so AKS has a backend for the gateway.
+    # service:
+    #   type: LoadBalancer
+    # Then: kubectl get svc langfuse-web -n langfuse  # EXTERNAL-IP; set nextauth.url to Front Door or your domain, not the raw IP.
+  worker:
+    image:
+      repository: "<ACR_NAME>.azurecr.io/langfuse-worker"
+      tag: "v1"
+
+  # SSO environment variables — Blob is handled by the s3: section below.
+  # Do NOT duplicate Blob env vars here; the chart's s3: section maps them automatically.
+  additionalEnv:
+    # --- Azure AD SSO ---
+    - name: AUTH_AZURE_AD_CLIENT_ID
+      valueFrom:
+        secretKeyRef:
+          name: langfuse-sso
+          key: client-id
+    - name: AUTH_AZURE_AD_CLIENT_SECRET
+      valueFrom:
+        secretKeyRef:
+          name: langfuse-sso
+          key: client-secret
+    - name: AUTH_AZURE_AD_TENANT_ID
+      value: "<YOUR_TENANT_ID>"
+    - name: AUTH_DISABLE_USERNAME_PASSWORD
+      value: "true"
+    - name: AUTH_AZURE_AD_ALLOW_ACCOUNT_LINKING
+      value: "true"
+    # LANGFUSE_USE_AZURE_BLOB is set by the chart from s3.storageProvider: "azure" below — do NOT add it here (duplicate env causes kubectl warnings).
+    # WARNING: Do NOT set AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID here.
+    # DefaultAzureCredential picks up Workload Identity automatically from the pod's
+    # projected service account token. Setting these env vars would override Workload Identity.
+
+  ingress:
+    enabled: false
+    # For production, enable and configure:
+    # className: nginx
+    # hosts:
+    #   - host: langfuse.yourdomain.com
+    #     paths:
+    #       - path: /
+    #         pathType: Prefix
+
+# --- In-cluster data stores (no Azure resource keys) ---
+
+postgresql:
+  deploy: true
+  auth:
+    username: postgres
+    password: "<DB_PASSWORD>"
+    database: langfuse
+
+redis:
+  deploy: true
+  auth:
+    password: "<REDIS_PASSWORD>"
+
+clickhouse:
+  deploy: true
+  auth:
+    password: "<CH_PASSWORD>"
+  replicaCount: 1
+  resourcesPreset: large  # use "2xlarge" for production; "large" saves cost for testing
+
+# --- Blob Storage: external Azure, accessed via Workload Identity ---
+# The chart maps these to LANGFUSE_S3_* env vars in the pod templates.
+# Do NOT also set these as additionalEnv — that would duplicate/conflict.
+
+s3:
+  deploy: false
+  storageProvider: "azure"
+  bucket: "<BLOB_CONTAINER>"
+  endpoint: "https://<STORAGE_ACCOUNT>.blob.core.windows.net"
+  # DO NOT set accessKeyId or secretAccessKey — Workload Identity handles auth.
+  eventUpload:
+    prefix: "events/"
+  batchExport:
+    enabled: true
+    prefix: "exports/"
+  mediaUpload:
+    enabled: true
+    prefix: "media/"
