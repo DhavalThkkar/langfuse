@@ -53,6 +53,11 @@ export const observationEventsFilterConfig: FilterConfig = {
       label: getEventsColumnName("level"),
     },
     {
+      type: "positionInTrace" as const,
+      column: "positionInTrace",
+      label: getEventsColumnName("positionInTrace"),
+    },
+    {
       type: "categorical" as const,
       column: "providedModelName",
       label: getEventsColumnName("providedModelName"),

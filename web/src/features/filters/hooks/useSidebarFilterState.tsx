@@ -197,13 +197,28 @@ export interface StringKeyValueUIFilter extends BaseUIFilter {
   onChange: (filters: StringKeyValueFilterEntry[]) => void;
 }
 
+export type PositionInTraceMode =
+  | "root"
+  | "last"
+  | "nthFromStart"
+  | "nthFromEnd";
+
+export interface PositionInTraceUIFilter extends BaseUIFilter {
+  type: "positionInTrace";
+  mode: PositionInTraceMode | null;
+  nthValue: number;
+  onModeChange: (mode: PositionInTraceMode | null) => void;
+  onNthValueChange: (value: number) => void;
+}
+
 export type UIFilter =
   | CategoricalUIFilter
   | NumericUIFilter
   | StringUIFilter
   | KeyValueUIFilter
   | NumericKeyValueUIFilter
-  | StringKeyValueUIFilter;
+  | StringKeyValueUIFilter
+  | PositionInTraceUIFilter;
 
 const EMPTY_MAP: Map<string, number> = new Map();
 
@@ -760,6 +775,83 @@ export function useSidebarFilterState(
 
     return config.facets
       .map((facet): UIFilter | null => {
+        if (facet.type === "positionInTrace") {
+          const existing = filterState.find(
+            (f) => f.column === facet.column && f.type === "positionInTrace",
+          );
+          const currentMode: PositionInTraceMode | null =
+            existing && "key" in existing
+              ? (existing.key as PositionInTraceMode)
+              : null;
+          const currentNthValue =
+            existing &&
+            "value" in existing &&
+            typeof existing.value === "number"
+              ? existing.value
+              : 1;
+          const isActive = currentMode !== null;
+
+          return {
+            type: "positionInTrace",
+            column: facet.column,
+            label: facet.label,
+            mode: currentMode,
+            nthValue: currentNthValue,
+            loading: false,
+            expanded: expandedSet.has(facet.column),
+            isActive,
+            onModeChange: (mode: PositionInTraceMode | null) => {
+              const withoutPosition = filterState.filter(
+                (f) =>
+                  !(f.column === facet.column && f.type === "positionInTrace"),
+              );
+              if (mode === null) {
+                setFilterState(withoutPosition);
+              } else {
+                const needsValue =
+                  mode === "nthFromStart" || mode === "nthFromEnd";
+                setFilterState([
+                  ...withoutPosition,
+                  {
+                    column: facet.column,
+                    type: "positionInTrace" as const,
+                    operator: "=" as const,
+                    key: mode,
+                    value: needsValue ? currentNthValue : undefined,
+                  },
+                ]);
+              }
+            },
+            onNthValueChange: (value: number) => {
+              const withoutPosition = filterState.filter(
+                (f) =>
+                  !(f.column === facet.column && f.type === "positionInTrace"),
+              );
+              const mode = currentMode ?? "nthFromStart";
+              setFilterState([
+                ...withoutPosition,
+                {
+                  column: facet.column,
+                  type: "positionInTrace" as const,
+                  operator: "=" as const,
+                  key: mode,
+                  value: Math.max(1, value),
+                },
+              ]);
+            },
+            onReset: () => {
+              setFilterState(
+                filterState.filter(
+                  (f) =>
+                    !(
+                      f.column === facet.column && f.type === "positionInTrace"
+                    ),
+                ),
+              );
+            },
+          };
+        }
+
         if (facet.type === "numeric") {
           const currentRange = computeNumericRange(
             facet.column,

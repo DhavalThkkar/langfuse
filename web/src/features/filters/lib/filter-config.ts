@@ -51,6 +51,12 @@ interface StringKeyValueFacet {
   keyOptions?: string[];
 }
 
+interface PositionInTraceFacet {
+  type: "positionInTrace";
+  column: string;
+  label: string;
+}
+
 export type Facet =
   | CategoricalFacet
   | BooleanFacet
@@ -58,7 +64,8 @@ export type Facet =
   | StringFacet
   | KeyValueFacet
   | NumericKeyValueFacet
-  | StringKeyValueFacet;
+  | StringKeyValueFacet
+  | PositionInTraceFacet;
 
 export interface FilterConfig {
   tableName: string;
