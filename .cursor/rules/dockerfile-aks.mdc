@@ -1,0 +1,7 @@
+# Dockerfiles (AKS / client deployment)
+
+**Never replace our Dockerfiles with Langfuse upstream's version. Always keep ours as-is.**
+
+- `web/Dockerfile` and `worker/Dockerfile` are our client-specific versions (e.g. alpine base, no platform pin, our turbo version).
+- When merging from upstream (`upstream/main`), resolve conflicts by **keeping our version** of both Dockerfiles. Do not adopt upstream's `FROM --platform=...` or other Dockerfile changes.
+- Do not edit the Dockerfiles to match upstream; keep our Dockerfile content unchanged unless the user explicitly asks to change it.
