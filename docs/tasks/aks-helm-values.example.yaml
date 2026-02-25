@@ -60,7 +60,7 @@ langfuse:
   web:
     image:
       repository: "<ACR_NAME>.azurecr.io/langfuse-web"
-      tag: "<GIT_SHA>"  # Use git SHA tag for traceability (e.g. "fe222f01d")
+      tag: "<GIT_SHA>" # Use git SHA tag for traceability (e.g. "fe222f01d")
     # Optional: expose web with a public IP (for Front Door or direct access). Omit to keep ClusterIP (port-forward only).
     # When using Front Door or an enterprise-allocated domain, enable this so AKS has a backend for the gateway.
     # service:
@@ -69,7 +69,7 @@ langfuse:
   worker:
     image:
       repository: "<ACR_NAME>.azurecr.io/langfuse-worker"
-      tag: "<GIT_SHA>"  # Must match the web image tag
+      tag: "<GIT_SHA>" # Must match the web image tag
 
   # SSO environment variables — Blob is handled by the s3: section below.
   # Do NOT duplicate Blob env vars here; the chart's s3: section maps them automatically.
@@ -125,10 +125,14 @@ clickhouse:
   auth:
     password: "<CH_PASSWORD>"
   replicaCount: 1
-  resourcesPreset: large  # use "2xlarge" for production; "large" saves cost for testing
+  # Sizing:
+  # - Test run (<=2 projects, low traffic): use "large".
+  # - Production: use "2xlarge" or larger; ClickHouse is the first bottleneck for dashboards/observations.
+  resourcesPreset: large # change to "2xlarge" or larger for production
   # CRITICAL: Default Bitnami persistence is 8Gi; when full, worker drops traces/observations and UI shows "Trace not found".
+  # Test: 50Gi is usually fine; Production: start at 100Gi+.
   persistence:
-    size: 50Gi  # increase as needed; consider project data retention to limit growth
+    size: 50Gi # increase as needed; consider project data retention to limit growth
 
 # --- Blob Storage: external Azure, accessed via Workload Identity ---
 # The chart maps these to LANGFUSE_S3_* env vars in the pod templates.

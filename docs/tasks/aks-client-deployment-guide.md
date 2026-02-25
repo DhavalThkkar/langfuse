@@ -10,12 +10,12 @@ This guide provides a complete, client‑facing deployment and upgrade reference
 
 Install the following on the machine that will run the deployment:
 
-| Tool | Minimum Version | Install |
-|------|----------------|---------|
-| **Azure CLI (`az`)** | 2.60+ | `curl -sL https://aka.ms/InstallAzureCLIDeb \| sudo bash` |
-| **kubectl** | 1.28+ | `az aks install-cli` |
-| **Helm** | 3.14+ | [helm.sh/docs/intro/install](https://helm.sh/docs/intro/install/) |
-| **Docker** | 24+ | [docs.docker.com/engine/install](https://docs.docker.com/engine/install/) |
+| Tool                 | Minimum Version | Install                                                                   |
+| -------------------- | --------------- | ------------------------------------------------------------------------- |
+| **Azure CLI (`az`)** | 2.60+           | `curl -sL https://aka.ms/InstallAzureCLIDeb \| sudo bash`                 |
+| **kubectl**          | 1.28+           | `az aks install-cli`                                                      |
+| **Helm**             | 3.14+           | [helm.sh/docs/intro/install](https://helm.sh/docs/intro/install/)         |
+| **Docker**           | 24+             | [docs.docker.com/engine/install](https://docs.docker.com/engine/install/) |
 
 Log in to Azure and set your subscription:
 
@@ -259,10 +259,14 @@ clickhouse:
   auth:
     password: "<CH_PASSWORD>"
   replicaCount: 1
-  resourcesPreset: "2xlarge" # Production; use "large" for dev
+  # Sizing:
+  # - Test run (<=2 projects, low traffic): use "large".
+  # - Production: use "2xlarge" or larger; ClickHouse is the first bottleneck for dashboards/observations.
+  resourcesPreset: "large" # change to "2xlarge" or larger for production
   # Avoid "Trace not found" / worker dropping records: default Bitnami persistence is 8Gi and fills up.
+  # Test: 50Gi is usually fine; Production: start at 100Gi+.
   persistence:
-    size: 50Gi  # increase as needed; use project data retention to limit growth
+    size: 50Gi # increase as needed; use project data retention to limit growth
 
 # Azure Blob (Workload Identity, no keys)
 s3:
@@ -294,12 +298,12 @@ s3:
 
 ## 10) Known Failure Modes (and Fixes)
 
-| Symptom                | Likely Cause                            | Fix                                          |
-| ---------------------- | --------------------------------------- | -------------------------------------------- |
-| Presigned URL 403      | Missing **Storage Blob Delegator** role | Assign role to managed identity              |
-| “State cookie missing” | `nextauth.url` mismatch                 | Align `nextauth.url` + Azure AD redirect URI |
-| Image pull errors      | ACR not attached / no AcrPull           | Attach ACR to AKS or add imagePullSecret     |
-| CrashLoopBackOff       | DB/ClickHouse not ready                 | Check DB pods, then web/worker logs          |
+| Symptom                                                    | Likely Cause                               | Fix                                                                                                                             |
+| ---------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| Presigned URL 403                                          | Missing **Storage Blob Delegator** role    | Assign role to managed identity                                                                                                 |
+| “State cookie missing”                                     | `nextauth.url` mismatch                    | Align `nextauth.url` + Azure AD redirect URI                                                                                    |
+| Image pull errors                                          | ACR not attached / no AcrPull              | Attach ACR to AKS or add imagePullSecret                                                                                        |
+| CrashLoopBackOff                                           | DB/ClickHouse not ready                    | Check DB pods, then web/worker logs                                                                                             |
 | "Trace not found" / worker "dropped N traces/observations" | **ClickHouse disk full** (default PVC 8Gi) | Resize the existing PVC with kubectl (Helm cannot change StatefulSet volumeClaimTemplates). See **ClickHouse disk full** below. |
 
 ### ClickHouse disk full (worker drops traces, "Trace not found")
