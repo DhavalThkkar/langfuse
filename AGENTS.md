@@ -43,6 +43,8 @@ langfuse/
 - Dev all packages: `pnpm run dev`
 - Dev web only: `pnpm run dev:web`
 - Dev worker only: `pnpm run dev:worker`
+- Codex environment bootstrap: `bash scripts/codex/setup.sh`
+- Codex environment maintenance: `bash scripts/codex/maintenance.sh`
 - Lint all: `pnpm run lint`
 - Typecheck all: `pnpm run typecheck` / `pnpm tc`
 - To try running build, always run `pnpm run build:check` and verify that it succeeds. This does not impact running web servers
@@ -73,6 +75,7 @@ Minimum verification matrix:
 - Keep each test independent and parallel-safe.
 - `web/src/__tests__/server`: avoid `pruneDatabase` calls.
 - Client tests contain `....clienttest.ts`
+- When you write a test for a bug or similar, write the test that fails first. Check that it fails. Only then fix the bug. Otherwise, the test is not good!
 
 ## Commit & Pull Request Guidelines
 - Follow Conventional Commits.
@@ -88,9 +91,13 @@ Minimum verification matrix:
 - Root `AGENTS.md` is monorepo-level only.
 - Package-local runbooks, commands, and entry points belong in package `AGENTS.md` files.
 - Keep guidance DRY: canonicalize to the most specific file.
+- Repo-owned Codex cloud bootstrap lives in `scripts/codex/setup.sh` and `scripts/codex/maintenance.sh`; contributors still configure the actual environment in the Codex UI.
 
 ## Release Channel
 - Release workflow is managed at root (`pnpm run release`).
+- Langfuse Cloud deployments are triggered by pushes to `production` (`.github/workflows/deploy.yml`).
+- Promote `main` to `production` via `.github/workflows/promote-main-to-production.yml` (manual `workflow_dispatch`).
+- Use `pnpm run release:cloud` for CLI-triggered Cloud promotions with preflight branch/migration checks.
 - Do not change release/versioning flow without updating this file and impacted package guides.
 
 ## GitHub Search
