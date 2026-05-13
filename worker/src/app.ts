@@ -13,7 +13,7 @@ import {
   evalJobDatasetCreatorQueueProcessor,
   evalJobExecutorQueueProcessorBuilder,
   evalJobTraceCreatorQueueProcessor,
-  llmAsJudgeExecutionQueueProcessor,
+  llmAsJudgeExecutionQueueProcessorBuilder,
 } from "./queues/evalQueue";
 import { batchExportQueueProcessor } from "./queues/batchExportQueue";
 import { onShutdown } from "./utils/shutdown";
@@ -33,10 +33,15 @@ import {
   BlobStorageIntegrationQueue,
   DeadLetterRetryQueue,
   IngestionQueue,
+  SecondaryIngestionQueue,
   OtelIngestionQueue,
   TraceUpsertQueue,
   CloudFreeTierUsageThresholdQueue,
+  CloudUsageMeteringQueue,
   EventPropagationQueue,
+  EvalExecutionQueue,
+  SecondaryEvalExecutionQueue,
+  LLMAsJudgeExecutionQueue,
 } from "@langfuse/shared/src/server";
 import { env } from "./env";
 import { ingestionQueueProcessorBuilder } from "./queues/ingestionQueue";
@@ -85,6 +90,7 @@ import { MediaRetentionCleaner } from "./features/media-retention-cleaner";
 import { BatchTraceDeletionCleaner } from "./features/batch-trace-deletion-cleaner";
 import { BatchProjectMediaCleaner } from "./features/batch-project-media-cleaner";
 import { BatchProjectBlobCleaner } from "./features/batch-project-blob-cleaner";
+import { QueueMetricsRunner } from "./features/queue-metrics-runner";
 
 const app = express();
 
@@ -231,49 +237,54 @@ if (env.QUEUE_CONSUMER_DATASET_RUN_ITEM_UPSERT_QUEUE_IS_ENABLED === "true") {
 }
 
 if (env.QUEUE_CONSUMER_EVAL_EXECUTION_QUEUE_IS_ENABLED === "true") {
-  WorkerManager.register(
-    QueueName.EvaluationExecution,
-    evalJobExecutorQueueProcessorBuilder(true, QueueName.EvaluationExecution),
-    {
-      concurrency: env.LANGFUSE_EVAL_EXECUTION_WORKER_CONCURRENCY,
-      // The default lockDuration is 30s and the lockRenewTime 1/2 of that.
-      // We set it to 60s to reduce the number of lock renewals and also be less sensitive to high CPU wait times.
-      // We also update the stalledInterval check to 120s from 30s default to perform the check less frequently.
-      // Finally, we set the maxStalledCount to 3 (default 1) to perform repeated attempts on stalled jobs.
-      lockDuration: 60000, // 60 seconds
-      stalledInterval: 120000, // 120 seconds
-      maxStalledCount: 3,
-    },
-  );
+  const shardNames = EvalExecutionQueue.getShardNames();
+  shardNames.forEach((shardName) => {
+    WorkerManager.register(
+      shardName as QueueName,
+      evalJobExecutorQueueProcessorBuilder(true, shardName),
+      {
+        concurrency: env.LANGFUSE_EVAL_EXECUTION_WORKER_CONCURRENCY,
+        // The default lockDuration is 30s and the lockRenewTime 1/2 of that.
+        // We set it to 60s to reduce the number of lock renewals and also be less sensitive to high CPU wait times.
+        // We also update the stalledInterval check to 120s from 30s default to perform the check less frequently.
+        // Finally, we set the maxStalledCount to 3 (default 1) to perform repeated attempts on stalled jobs.
+        lockDuration: 60000, // 60 seconds
+        stalledInterval: 120000, // 120 seconds
+        maxStalledCount: 3,
+      },
+    );
+  });
 
-  // LLM-as-Judge execution for observation-level evals (uses same env flag as trace evals)
-  WorkerManager.register(
-    QueueName.LLMAsJudgeExecution,
-    llmAsJudgeExecutionQueueProcessor,
-    {
-      concurrency: env.LANGFUSE_EVAL_EXECUTION_WORKER_CONCURRENCY,
-      lockDuration: 60000,
-      stalledInterval: 120000,
-      maxStalledCount: 3,
-    },
-  );
+  const llmAsJudgeShardNames = LLMAsJudgeExecutionQueue.getShardNames();
+  llmAsJudgeShardNames.forEach((shardName) => {
+    WorkerManager.register(
+      shardName as QueueName,
+      llmAsJudgeExecutionQueueProcessorBuilder(shardName),
+      {
+        concurrency: env.LANGFUSE_LLM_AS_JUDGE_EXECUTION_WORKER_CONCURRENCY,
+        lockDuration: 60000,
+        stalledInterval: 120000,
+        maxStalledCount: 3,
+      },
+    );
+  });
 }
 
 if (env.QUEUE_CONSUMER_EVAL_EXECUTION_SECONDARY_QUEUE_IS_ENABLED === "true") {
-  WorkerManager.register(
-    QueueName.EvaluationExecutionSecondaryQueue,
-    evalJobExecutorQueueProcessorBuilder(
-      false,
-      QueueName.EvaluationExecutionSecondaryQueue,
-    ),
-    {
-      concurrency:
-        env.LANGFUSE_EVAL_EXECUTION_SECONDARY_QUEUE_PROCESSING_CONCURRENCY,
-      lockDuration: 60000, // 60 seconds
-      stalledInterval: 120000, // 120 seconds
-      maxStalledCount: 3,
-    },
-  );
+  const shardNames = SecondaryEvalExecutionQueue.getShardNames();
+  shardNames.forEach((shardName) => {
+    WorkerManager.register(
+      shardName as QueueName,
+      evalJobExecutorQueueProcessorBuilder(false, shardName),
+      {
+        concurrency:
+          env.LANGFUSE_EVAL_EXECUTION_SECONDARY_QUEUE_PROCESSING_CONCURRENCY,
+        lockDuration: 60000, // 60 seconds
+        stalledInterval: 120000, // 120 seconds
+        maxStalledCount: 3,
+      },
+    );
+  });
 }
 
 if (env.QUEUE_CONSUMER_BATCH_EXPORT_QUEUE_IS_ENABLED === "true") {
@@ -330,20 +341,26 @@ if (env.QUEUE_CONSUMER_INGESTION_QUEUE_IS_ENABLED === "true") {
 }
 
 if (env.QUEUE_CONSUMER_INGESTION_SECONDARY_QUEUE_IS_ENABLED === "true") {
-  WorkerManager.register(
-    QueueName.IngestionSecondaryQueue,
-    ingestionQueueProcessorBuilder(false),
-    {
-      concurrency:
-        env.LANGFUSE_INGESTION_SECONDARY_QUEUE_PROCESSING_CONCURRENCY,
-    },
-  );
+  const shardNames = SecondaryIngestionQueue.getShardNames();
+  shardNames.forEach((shardName) => {
+    WorkerManager.register(
+      shardName as QueueName,
+      ingestionQueueProcessorBuilder(false),
+      {
+        concurrency:
+          env.LANGFUSE_INGESTION_SECONDARY_QUEUE_PROCESSING_CONCURRENCY,
+      },
+    );
+  });
 }
 
 if (
   env.QUEUE_CONSUMER_CLOUD_USAGE_METERING_QUEUE_IS_ENABLED === "true" &&
   env.STRIPE_SECRET_KEY
 ) {
+  // Instantiate the queue to trigger scheduled jobs
+  CloudUsageMeteringQueue.getInstance();
+
   WorkerManager.register(
     QueueName.CloudUsageMeteringQueue,
     cloudUsageMeteringQueueProcessor,
@@ -590,9 +607,7 @@ if (env.LANGFUSE_BATCH_PROJECT_CLEANER_ENABLED === "true") {
   for (const table of BATCH_DELETION_TABLES) {
     // Only start the events table cleaners if the events table experiment is enabled
     if (
-      (table !== "events_full" &&
-        table !== "events_core" &&
-        table !== "events") ||
+      (table !== "events_full" && table !== "events_core") ||
       env.LANGFUSE_EXPERIMENT_INSERT_INTO_EVENTS_TABLE === "true"
     ) {
       const cleaner = new BatchProjectCleaner(table);
@@ -609,9 +624,7 @@ if (env.LANGFUSE_BATCH_DATA_RETENTION_CLEANER_ENABLED === "true") {
   for (const table of BATCH_DATA_RETENTION_TABLES) {
     // Only start the events table cleaners if the events table experiment is enabled
     if (
-      (table !== "events_full" &&
-        table !== "events_core" &&
-        table !== "events") ||
+      (table !== "events_full" && table !== "events_core") ||
       env.LANGFUSE_EXPERIMENT_INSERT_INTO_EVENTS_TABLE === "true"
     ) {
       const cleaner = new BatchDataRetentionCleaner(table);
@@ -657,6 +670,14 @@ export let batchTraceDeletionCleaner: BatchTraceDeletionCleaner | null = null;
 if (env.LANGFUSE_BATCH_TRACE_DELETION_CLEANER_ENABLED === "true") {
   batchTraceDeletionCleaner = new BatchTraceDeletionCleaner();
   batchTraceDeletionCleaner.start();
+}
+
+// Queue metrics background reporter
+export let queueMetricsRunner: QueueMetricsRunner | null = null;
+
+if (env.LANGFUSE_QUEUE_METRICS_ENABLED === "true") {
+  queueMetricsRunner = new QueueMetricsRunner();
+  queueMetricsRunner.start();
 }
 
 process.on("SIGINT", () => onShutdown("SIGINT"));

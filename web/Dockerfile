@@ -3,23 +3,44 @@ FROM node:24-alpine AS alpine
 
 # It's important to update the index before installing packages to ensure you're getting the latest versions.
 # Check https://github.com/nodejs/docker-node/tree/b4117f9333da4138b03a546ec926ef50a31506c3#nodealpine to understand why libc6-compat might be needed.
-RUN apk update && apk upgrade --no-cache libcrypto3 libssl3 libc6-compat busybox ssl_client
+RUN apk update && apk upgrade --no-cache libcrypto3 libssl3 libc6-compat busybox ssl_client zlib
 
-FROM alpine AS base
+FROM alpine AS build-base
+# Pin turbo to avoid nondeterministic prune output from future patch releases.
 RUN npm install turbo@^2.8.10 --global
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
-RUN corepack prepare pnpm@9.5.0 --activate
+RUN corepack prepare pnpm@10.33.0 --activate
 
-FROM base AS pruner
+FROM alpine AS runtime-base
+# Remove build-only package managers. npm stays here because the runner stage
+# uses it to install prisma and optional dd-trace before removing it.
+RUN rm -rf /usr/local/lib/node_modules/corepack && \
+    rm -f /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg
+
+FROM golang:1.24 AS migrate-builder
+ARG TARGETOS
+ARG TARGETARCH
+ENV CGO_ENABLED=0 \
+    GOBIN=/out \
+    GOOS=${TARGETOS} \
+    GOARCH=${TARGETARCH}
+# Build only the ClickHouse migrate CLI Langfuse uses at runtime.
+# compile this ourselves instead of downloading the upstream release
+# because prebuilt bins bundle many unused drivers and thus inherit CVEs
+# eg.: https://github.com/golang-migrate/migrate/issues/1357
+RUN /usr/local/go/bin/go install -trimpath -tags 'clickhouse' -ldflags='-s -w' \
+    github.com/golang-migrate/migrate/v4/cmd/migrate@v4.19.1
+
+FROM build-base AS pruner
 
 WORKDIR /app
 
 COPY . .
 RUN turbo prune --scope=web --docker
 
-FROM base AS builder
+FROM build-base AS builder
 
 WORKDIR /app
 
@@ -30,15 +51,15 @@ COPY --from=pruner /app/out/json/ .
 
 RUN pnpm install --frozen-lockfile
 
-ENV DOCKER_BUILD=1
-ENV NEXT_MANUAL_SIG_HANDLE=true
+ENV DOCKER_BUILD 1
+ENV NEXT_MANUAL_SIG_HANDLE true
 
 # pass public variables in build step
 ARG NEXT_PUBLIC_PLAIN_APP_ID
 ARG NEXT_PUBLIC_LANGFUSE_CLOUD_REGION
-ENV NEXT_PUBLIC_LANGFUSE_CLOUD_REGION="$NEXT_PUBLIC_LANGFUSE_CLOUD_REGION"
+ENV NEXT_PUBLIC_LANGFUSE_CLOUD_REGION=$NEXT_PUBLIC_LANGFUSE_CLOUD_REGION
 ARG NEXT_PUBLIC_DEMO_ORG_ID
-ENV NEXT_PUBLIC_DEMO_ORG_ID="$NEXT_PUBLIC_DEMO_ORG_ID"
+ENV NEXT_PUBLIC_DEMO_ORG_ID=$NEXT_PUBLIC_DEMO_ORG_ID
 ARG NEXT_PUBLIC_DEMO_PROJECT_ID
 ENV NEXT_PUBLIC_DEMO_PROJECT_ID=$NEXT_PUBLIC_DEMO_PROJECT_ID
 ARG NEXT_PUBLIC_SIGN_UP_DISABLED
@@ -56,9 +77,10 @@ ENV NEXT_PUBLIC_SENTRY_DSN=$NEXT_PUBLIC_SENTRY_DSN
 ARG NEXT_PUBLIC_BASE_PATH
 ENV NEXT_PUBLIC_BASE_PATH=$NEXT_PUBLIC_BASE_PATH
 
-# Sentry: auth token used at build time for sourcemap upload (optional for OSS; use Docker build --secret in CI to avoid leaking).
+# Sentry already needs to be set on build time to upload sourcemaps
+# This must not be set for OSS releases as we would share our Sentry secret.
 ARG SENTRY_AUTH_TOKEN
-ENV SENTRY_AUTH_TOKEN="$SENTRY_AUTH_TOKEN"
+ENV SENTRY_AUTH_TOKEN=$SENTRY_AUTH_TOKEN
 ARG SENTRY_ORG
 ENV SENTRY_ORG=$SENTRY_ORG
 ARG SENTRY_PROJECT
@@ -78,15 +100,15 @@ RUN rm -f ./web/src/middleware.ts
 # Next.js collects completely anonymous telemetry data about general usage.
 # Learn more here: https://nextjs.org/telemetry
 # Uncomment the following line in case you want to disable telemetry during the build.
-ENV NEXT_TELEMETRY_DISABLED=1
-ENV NEXT_MANUAL_SIG_HANDLE=true
+ENV NEXT_TELEMETRY_DISABLED 1
+ENV NEXT_MANUAL_SIG_HANDLE true
 # set the CI flag to true to get CI specific logs
-ENV CI=true
+ENV CI true
 
 RUN NODE_OPTIONS='--max-old-space-size-percentage=75' turbo run build --filter=web...
 
 # Production image, copy all the files and run next
-FROM base AS runner
+FROM runtime-base AS runner
 
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
@@ -98,13 +120,13 @@ ENV BUILD_ID=$NEXT_PUBLIC_BUILD_ID
 ARG NEXT_PUBLIC_LANGFUSE_CLOUD_REGION
 ENV NEXT_PUBLIC_LANGFUSE_CLOUD_REGION=$NEXT_PUBLIC_LANGFUSE_CLOUD_REGION
 
-ENV NODE_ENV=production
+ENV NODE_ENV production
 # Uncomment the following line in case you want to disable telemetry during runtime.
-ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_TELEMETRY_DISABLED 1
 # Needed to re-enable validation of environment variables during runtime
-ENV DOCKER_BUILD=0
+ENV DOCKER_BUILD 0
 # Set NEXT_MANUAL_SIG_HANDLE for runtime
-ENV NEXT_MANUAL_SIG_HANDLE=true
+ENV NEXT_MANUAL_SIG_HANDLE true
 
 RUN apk add --no-cache dumb-init tzdata
 
@@ -114,17 +136,19 @@ ARG GID=1001
 RUN addgroup --system --gid ${GID} nodejs
 RUN adduser --system --uid ${UID} nextjs
 
-RUN npm install -g --no-package-lock --no-save prisma@6.17.1
+RUN npm install -g --no-package-lock --no-save prisma@6.19.3
 
 # Install dd-trace only if NEXT_PUBLIC_LANGFUSE_CLOUD_REGION is configured
 ARG NEXT_PUBLIC_LANGFUSE_CLOUD_REGION
 RUN if [ -n "$NEXT_PUBLIC_LANGFUSE_CLOUD_REGION" ]; then \
-    npm install --no-package-lock --no-save dd-trace@5.65.0; \
+    npm install --no-package-lock --no-save dd-trace@5.97.0; \
     fi
 
-RUN MIGRATE_TARGET_ARCH=$(echo ${TARGETPLATFORM:-linux/amd64} | sed 's/\//-/g') && \
-    wget -q -O- https://github.com/golang-migrate/migrate/releases/download/v4.19.1/migrate.$MIGRATE_TARGET_ARCH.tar.gz | tar xvz && \
-    mv migrate /usr/bin/migrate
+# npm is only used for the installs above; remove it from the final runtime image.
+RUN rm -rf /usr/local/lib/node_modules/npm && \
+    rm -f /usr/local/bin/npm /usr/local/bin/npx
+
+COPY --from=migrate-builder /out/migrate /usr/bin/migrate
 
 COPY --from=builder --chown=nextjs:nodejs /app/web/next.config.mjs .
 COPY --from=builder --chown=nextjs:nodejs /app/web/package.json .
@@ -145,11 +169,15 @@ RUN chmod +x ./web/entrypoint.sh
 USER nextjs
 
 # Default port to 3000
-ENV PORT=3000
+ENV PORT 3000
 
 # Docker ENTRYPOINT (dumb-init) is covered by semantic versioning, not the entrypoint.sh itself
 # Reasoning: ENTRYPOINT is overridden by some self-hosted deployments, thus changing this is breaking
 ENTRYPOINT ["dumb-init", "--", "./web/entrypoint.sh"]
 
 # startup command - use dd-trace if NEXT_PUBLIC_LANGFUSE_CLOUD_REGION is configured
-CMD ["sh", "-c", "if [ -n \"$NEXT_PUBLIC_LANGFUSE_CLOUD_REGION\" ]; then node --import dd-trace/initialize.mjs ./web/server.js --keepAliveTimeout 110000; else node ./web/server.js --keepAliveTimeout 110000; fi"]
+CMD if [ -n "$NEXT_PUBLIC_LANGFUSE_CLOUD_REGION" ]; then \
+    node --import dd-trace/initialize.mjs ./web/server.js --keepAliveTimeout 110000; \
+    else \
+    node ./web/server.js --keepAliveTimeout 110000; \
+    fi

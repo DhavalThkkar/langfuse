@@ -6,6 +6,7 @@ import {
   createTrace,
   getTraceById,
   createEvent,
+  createOrgProjectAndApiKey,
   type EventRecordInsertType,
 } from "@langfuse/shared/src/server";
 import {
@@ -27,8 +28,6 @@ import { randomUUID } from "crypto";
 import snakeCase from "lodash/snakeCase";
 import { env } from "@/src/env.mjs";
 import waitForExpect from "wait-for-expect";
-
-const projectId = "7a88fb47-b4e2-43b8-a06c-a5ce950dc53a";
 
 // Helper type for creating observation/event data
 // Times are always in milliseconds, conversion handled internally
@@ -128,7 +127,8 @@ const createTraceWithObservations = async (
       user_id: trace.user_id ?? null,
       input: trace.input ?? null,
       output: trace.output ?? null,
-      metadata: trace.metadata ?? {},
+      metadata_names: Object.keys(trace.metadata ?? {}) ?? [],
+      metadata_values: Object.values(trace.metadata ?? {}) ?? [],
       cost_details: {
         total: 0, // Root trace event has no cost
       },
@@ -155,6 +155,15 @@ const createTraceWithObservations = async (
 };
 
 describe("/api/public/traces API Endpoint", () => {
+  let projectId: string;
+  let auth: string;
+
+  beforeEach(async () => {
+    const fixture = await createOrgProjectAndApiKey();
+    projectId = fixture.projectId;
+    auth = fixture.auth;
+  });
+
   it("should create and get a trace via /traces", async () => {
     const createdTrace = createTrace({
       name: "trace-name",
@@ -193,6 +202,8 @@ describe("/api/public/traces API Endpoint", () => {
       GetTraceV1Response,
       "GET",
       "/api/public/traces/" + createdTrace.id,
+      undefined,
+      auth,
     );
 
     expect(trace.body.name).toBe("trace-name");
@@ -217,6 +228,145 @@ describe("/api/public/traces API Endpoint", () => {
         }),
       ]),
     );
+  });
+
+  it("should fetch a trace with core-only fields when fields=core", async () => {
+    const traceId = randomUUID();
+    const createdTrace = createTrace({
+      id: traceId,
+      name: "trace-core-only",
+      user_id: "user-1",
+      project_id: projectId,
+      metadata: { key: "value" },
+      input: JSON.stringify({ prompt: "test" }),
+      output: JSON.stringify({ response: "test response" }),
+    });
+
+    const observation = createObservation({
+      trace_id: traceId,
+      project_id: projectId,
+      name: "test-observation",
+      end_time: new Date().getTime(),
+      start_time: new Date().getTime() - 1000,
+      cost_details: { input: 0.02, output: 0.03, total: 0.05 },
+    });
+
+    const score = createTraceScore({
+      trace_id: traceId,
+      project_id: projectId,
+      name: "test-score",
+      value: 0.8,
+    });
+
+    await createTracesCh([createdTrace]);
+    await createObservationsCh([observation]);
+    await createScoresCh([score]);
+
+    const trace = await makeZodVerifiedAPICall(
+      GetTraceV1Response,
+      "GET",
+      `/api/public/traces/${traceId}?fields=core`,
+      undefined,
+      auth,
+    );
+
+    expect(trace.body.id).toBe(traceId);
+    expect(trace.body.input).toBeNull();
+    expect(trace.body.output).toBeNull();
+    expect(trace.body.metadata).toEqual({});
+    expect(trace.body.observations).toEqual([]);
+    expect(trace.body.scores).toEqual([]);
+    expect(trace.body.totalCost).toBe(-1);
+    expect(trace.body.latency).toBe(-1);
+  });
+
+  it("should fetch a trace with core,scores,metrics fields", async () => {
+    const traceId = randomUUID();
+    const createdTrace = createTrace({
+      id: traceId,
+      name: "trace-with-scores-metrics",
+      project_id: projectId,
+      input: JSON.stringify({ prompt: "test" }),
+      output: JSON.stringify({ response: "test response" }),
+    });
+
+    const observation = createObservation({
+      trace_id: traceId,
+      project_id: projectId,
+      name: "test-observation",
+      end_time: new Date().getTime(),
+      start_time: new Date().getTime() - 1000,
+      cost_details: { input: 0.02, output: 0.03, total: 0.05 },
+      input: "observation input",
+      output: "observation output",
+    });
+
+    const score = createTraceScore({
+      trace_id: traceId,
+      project_id: projectId,
+      name: "test-score",
+      value: 0.8,
+    });
+
+    await createTracesCh([createdTrace]);
+    await createObservationsCh([observation]);
+    await createScoresCh([score]);
+
+    const trace = await makeZodVerifiedAPICall(
+      GetTraceV1Response,
+      "GET",
+      `/api/public/traces/${traceId}?fields=core,scores,metrics`,
+      undefined,
+      auth,
+    );
+
+    expect(trace.body.id).toBe(traceId);
+    expect(trace.body.input).toBeNull();
+    expect(trace.body.output).toBeNull();
+    expect(trace.body.observations).toEqual([]);
+    expect(trace.body.scores).toHaveLength(1);
+    expect(trace.body.totalCost).toBe(0.05);
+    expect(trace.body.latency).toBeCloseTo(1);
+  });
+
+  it("should return all fields when fields param contains only invalid groups", async () => {
+    const traceId = randomUUID();
+    const createdTrace = createTrace({
+      id: traceId,
+      name: "trace-invalid-fields",
+      project_id: projectId,
+      input: JSON.stringify({ prompt: "test" }),
+      output: JSON.stringify({ response: "test response" }),
+      metadata: { key: "value" },
+    });
+
+    const observation = createObservation({
+      trace_id: traceId,
+      project_id: projectId,
+      name: "test-observation",
+      end_time: new Date().getTime(),
+      start_time: new Date().getTime() - 1000,
+      cost_details: { input: 0.01, output: 0.02, total: 0.03 },
+    });
+
+    await createTracesCh([createdTrace]);
+    await createObservationsCh([observation]);
+
+    const trace = await makeZodVerifiedAPICall(
+      GetTraceV1Response,
+      "GET",
+      `/api/public/traces/${traceId}?fields=invalid_group,also_invalid`,
+      undefined,
+      auth,
+    );
+
+    // All invalid fields should fall back to returning all field groups
+    expect(trace.body.id).toBe(traceId);
+    expect(trace.body.input).not.toBeNull();
+    expect(trace.body.output).not.toBeNull();
+    expect(trace.body.observations).toHaveLength(1);
+    expect(trace.body.totalCost).toBeGreaterThanOrEqual(0);
+    expect(trace.body.latency).toBeGreaterThanOrEqual(0);
   });
 
   it("should fetch all traces", async () => {
@@ -259,6 +409,8 @@ describe("/api/public/traces API Endpoint", () => {
       GetTracesV1Response,
       "GET",
       "/api/public/traces",
+      undefined,
+      auth,
     );
 
     expect(traces.body.meta.totalItems).toBeGreaterThanOrEqual(1);
@@ -309,6 +461,8 @@ describe("/api/public/traces API Endpoint", () => {
         GetTracesV1Response,
         "GET",
         `/api/public/traces?${prop}=${value}`,
+        undefined,
+        auth,
       );
 
       expect(traces.body.meta.totalItems).toBe(1);
@@ -364,6 +518,8 @@ describe("/api/public/traces API Endpoint", () => {
       GetTracesV1Response,
       "GET",
       `/api/public/traces?environment=${environment}`,
+      undefined,
+      auth,
     );
 
     expect(traces.body.meta.totalItems).toBe(1);
@@ -424,6 +580,8 @@ describe("/api/public/traces API Endpoint", () => {
       GetTracesV1Response,
       "GET",
       `/api/public/traces?environment=${environment}`,
+      undefined,
+      auth,
     );
 
     expect(traces.body.meta.totalItems).toBe(1);
@@ -450,6 +608,8 @@ describe("/api/public/traces API Endpoint", () => {
       GetTracesV1Response,
       "GET",
       `/api/public/traces?tags=${[tag]}`,
+      undefined,
+      auth,
     );
 
     expect(traces.body.meta.totalItems).toBe(1);
@@ -485,6 +645,8 @@ describe("/api/public/traces API Endpoint", () => {
       GetTracesV1Response,
       "GET",
       `/api/public/traces?tags=${[tag]}&limit=1&offset=1`,
+      undefined,
+      auth,
     );
 
     expect(traces.body.meta.totalItems).toBe(3);
@@ -515,6 +677,8 @@ describe("/api/public/traces API Endpoint", () => {
       GetTracesV1Response,
       "GET",
       `/api/public/traces?tags=${[tag]}&orderBy=name.desc`,
+      undefined,
+      auth,
     );
 
     expect(traces.body.meta.totalItems).toBe(2);
@@ -530,6 +694,8 @@ describe("/api/public/traces API Endpoint", () => {
       GetTracesV1Response,
       "GET",
       "/api/public/traces?page=0&limit=10",
+      undefined,
+      auth,
     );
 
     expect(response.status).toBe(400);
@@ -540,6 +706,8 @@ describe("/api/public/traces API Endpoint", () => {
       GetTracesV1Response,
       "GET",
       "/api/public/traces?page=0&limit=10",
+      undefined,
+      auth,
     );
 
     expect(response.status).toBe(400);
@@ -547,9 +715,10 @@ describe("/api/public/traces API Endpoint", () => {
 
   it("LFE-3699: should fetch a single trace with unescaped metadata via traces list", async () => {
     const traceId = randomUUID();
+    const traceName = `trace-name-${traceId}`;
     const trace = createTrace({
       id: traceId,
-      name: "trace-name1",
+      name: traceName,
       project_id: projectId,
       metadata: { key: JSON.stringify({ foo: "bar" }) },
       input: JSON.stringify({
@@ -566,12 +735,14 @@ describe("/api/public/traces API Endpoint", () => {
     const traces = await makeZodVerifiedAPICall(
       GetTracesV1Response,
       "GET",
-      `/api/public/traces`,
+      `/api/public/traces?name=${encodeURIComponent(traceName)}&limit=1`,
+      undefined,
+      auth,
     );
 
     const traceResponse = traces.body.data.find((t) => t.id === traceId);
     expect(traceResponse).toBeDefined();
-    expect(traceResponse!.name).toBe("trace-name1");
+    expect(traceResponse!.name).toBe(traceName);
     expect(traceResponse!.metadata).toEqual({ key: { foo: "bar" } });
     expect(traceResponse!.input).toEqual({
       args: [
@@ -604,6 +775,8 @@ describe("/api/public/traces API Endpoint", () => {
       GetTraceV1Response,
       "GET",
       `/api/public/traces/${traceId}`,
+      undefined,
+      auth,
     );
 
     expect(traceResponse.body.name).toBe("trace-name1");
@@ -663,6 +836,8 @@ describe("/api/public/traces API Endpoint", () => {
         GetTraceV1Response,
         "GET",
         `/api/public/traces/${traceId}`,
+        undefined,
+        auth,
       ),
     ).rejects.toThrow(
       "Observations in trace are too large: 90.00MB exceeds limit of 80.00MB",
@@ -682,6 +857,8 @@ describe("/api/public/traces API Endpoint", () => {
       DeleteTraceV1Response,
       "DELETE",
       `/api/public/traces/${createdTrace.id}`,
+      undefined,
+      auth,
     );
 
     // Then
@@ -712,6 +889,7 @@ describe("/api/public/traces API Endpoint", () => {
       {
         traceIds: [createdTrace1.id, createdTrace2.id],
       },
+      auth,
     );
 
     // Then
@@ -770,6 +948,8 @@ describe("/api/public/traces API Endpoint", () => {
         GetTracesV1Response,
         "GET",
         "/api/public/traces",
+        undefined,
+        auth,
       );
 
       const trace = traces.body.data.find((t) => t.id === traceId);
@@ -823,6 +1003,8 @@ describe("/api/public/traces API Endpoint", () => {
         GetTracesV1Response,
         "GET",
         "/api/public/traces?fields=core",
+        undefined,
+        auth,
       );
 
       const trace = traces.body.data.find((t) => t.id === traceId);
@@ -865,6 +1047,8 @@ describe("/api/public/traces API Endpoint", () => {
         GetTracesV1Response,
         "GET",
         "/api/public/traces?fields=core,io",
+        undefined,
+        auth,
       );
 
       const trace = traces.body.data.find((t) => t.id === traceId);
@@ -907,6 +1091,8 @@ describe("/api/public/traces API Endpoint", () => {
         GetTracesV1Response,
         "GET",
         "/api/public/traces?fields=core,scores",
+        undefined,
+        auth,
       );
 
       const trace = traces.body.data.find((t) => t.id === traceId);
@@ -949,6 +1135,8 @@ describe("/api/public/traces API Endpoint", () => {
         GetTracesV1Response,
         "GET",
         "/api/public/traces?fields=core,observations",
+        undefined,
+        auth,
       );
 
       const trace = traces.body.data.find((t) => t.id === traceId);
@@ -992,6 +1180,8 @@ describe("/api/public/traces API Endpoint", () => {
         GetTracesV1Response,
         "GET",
         "/api/public/traces?fields=core,metrics",
+        undefined,
+        auth,
       );
 
       const trace = traces.body.data.find((t) => t.id === traceId);
@@ -1016,6 +1206,8 @@ describe("/api/public/traces API Endpoint", () => {
         GetTracesV1Response,
         "GET",
         "/api/public/traces?fields=core,invalid,scores",
+        undefined,
+        auth,
       );
 
       // Should still work, just ignoring invalid field names
@@ -1062,6 +1254,8 @@ describe("/api/public/traces API Endpoint", () => {
         GetTracesV1Response,
         "GET",
         "/api/public/traces?fields=",
+        undefined,
+        auth,
       );
 
       // Should default to all fields when empty
@@ -1101,7 +1295,7 @@ describe("/api/public/traces API Endpoint", () => {
         const testTraceId = randomUUID();
         const testTraceId2 = randomUUID();
 
-        beforeAll(async () => {
+        beforeEach(async () => {
           // Create test traces with different metadata for filtering
           const trace1 = createTrace({
             id: testTraceId,
@@ -1159,6 +1353,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`filter=${encodeURIComponent(filterParam)}`),
+            undefined,
+            auth,
           );
 
           expect(traces.status).toBe(200);
@@ -1195,6 +1391,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`filter=${encodeURIComponent(filterParam)}`),
+            undefined,
+            auth,
           );
 
           expect(traces.status).toBe(200);
@@ -1228,6 +1426,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`filter=${encodeURIComponent(filterParam)}`),
+            undefined,
+            auth,
           );
 
           expect(traces.status).toBe(200);
@@ -1247,6 +1447,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`userId=filter-user-1&environment=production`),
+            undefined,
+            auth,
           );
 
           expect(traces.status).toBe(200);
@@ -1278,6 +1480,8 @@ describe("/api/public/traces API Endpoint", () => {
             buildUrl(
               `userId=filter-user-2&filter=${encodeURIComponent(filterParam)}`,
             ),
+            undefined,
+            auth,
           );
 
           expect(traces.status).toBe(200);
@@ -1311,6 +1515,8 @@ describe("/api/public/traces API Endpoint", () => {
             buildUrl(
               `userId=filter-user-1&filter=${encodeURIComponent(filterParam)}`,
             ),
+            undefined,
+            auth,
           );
 
           expect(traces.status).toBe(200);
@@ -1332,6 +1538,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`filter=${encodeURIComponent(malformedFilter)}`),
+            undefined,
+            auth,
           );
 
           expect(traces.status).toBe(400);
@@ -1351,6 +1559,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`filter=${encodeURIComponent(invalidFilterParam)}`),
+            undefined,
+            auth,
           );
 
           expect(traces.status).toBe(400);
@@ -1361,6 +1571,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`filter=`),
+            undefined,
+            auth,
           );
 
           expect(traces.status).toBe(200); // Empty string should be treated as undefined
@@ -1380,6 +1592,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`filter=${encodeURIComponent(invalidStructure)}`),
+            undefined,
+            auth,
           );
 
           expect(traces.status).toBe(400);
@@ -1399,6 +1613,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`filter=${encodeURIComponent(invalidOperator)}`),
+            undefined,
+            auth,
           );
 
           expect(traces.status).toBe(400);
@@ -1425,6 +1641,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`filter=${encodeURIComponent(filterRange)}`),
+            undefined,
+            auth,
           );
 
           expect(tracesRange.status).toBe(200);
@@ -1456,6 +1674,8 @@ describe("/api/public/traces API Endpoint", () => {
             buildUrl(
               `orderBy=timestamp.asc&fromTimestamp=2023-01-01T00:00:00Z&toTimestamp=2023-01-02T00:00:00Z&filter=${encodeURIComponent(filterParam)}`,
             ),
+            undefined,
+            auth,
           );
 
           expect(traces.status).toBe(200);
@@ -1541,6 +1761,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`filter=${encodeURIComponent(filterParam)}`),
+            undefined,
+            auth,
           );
 
           expect(traces.status).toBe(200);
@@ -1571,6 +1793,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`filter=${encodeURIComponent(filterParam2)}`),
+            undefined,
+            auth,
           );
 
           expect(traces2.status).toBe(200);
@@ -1694,6 +1918,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`fields=core&filter=${encodeURIComponent(filterParam)}`),
+            undefined,
+            auth,
           );
 
           expect(traces.status).toBe(200);
@@ -1785,6 +2011,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`fields=core&filter=${encodeURIComponent(filterParam)}`),
+            undefined,
+            auth,
           );
 
           expect(traces.status).toBe(200);
@@ -1869,6 +2097,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`fields=core,io,observations,metrics`),
+            undefined,
+            auth,
           );
 
           const trace = traces.body.data.find((t) => t.id === traceId);
@@ -1918,6 +2148,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`userId=${userId}`),
+            undefined,
+            auth,
           );
 
           expect(traces.body.meta.totalItems).toBeGreaterThanOrEqual(1);
@@ -1946,6 +2178,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`name=${traceName}`),
+            undefined,
+            auth,
           );
 
           const matchingTrace = traces.body.data.find((t) => t.id === traceId);
@@ -1969,6 +2203,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`environment=${environment}`),
+            undefined,
+            auth,
           );
 
           const matchingTrace = traces.body.data.find((t) => t.id === traceId);
@@ -1996,6 +2232,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`page=1&limit=2`),
+            undefined,
+            auth,
           );
 
           // Get page 2
@@ -2003,6 +2241,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`page=2&limit=2`),
+            undefined,
+            auth,
           );
 
           expect(page1.body.data.length).toBeLessThanOrEqual(2);
@@ -2047,6 +2287,8 @@ describe("/api/public/traces API Endpoint", () => {
             buildUrl(
               `fromTimestamp=${yesterday.toISOString()}&toTimestamp=${tomorrow.toISOString()}`,
             ),
+            undefined,
+            auth,
           );
 
           const inRangeFound = traces.body.data.find(
@@ -2084,6 +2326,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`fields=core,scores`),
+            undefined,
+            auth,
           );
 
           const trace = traces.body.data.find((t) => t.id === traceId);
@@ -2110,6 +2354,8 @@ describe("/api/public/traces API Endpoint", () => {
             GetTracesV1Response,
             "GET",
             buildUrl(`name=count-test-${prefix}`),
+            undefined,
+            auth,
           );
 
           expect(result.body.meta.totalItems).toBeGreaterThanOrEqual(3);
@@ -2150,6 +2396,8 @@ describe("/api/public/traces API Endpoint", () => {
         GetTracesV1Response,
         "GET",
         "/api/public/traces",
+        undefined,
+        auth,
       );
 
       expect(response.status).toBe(400);
@@ -2165,6 +2413,8 @@ describe("/api/public/traces API Endpoint", () => {
         GetTracesV1Response,
         "GET",
         `/api/public/traces?fromTimestamp=${fromTimestamp}`,
+        undefined,
+        auth,
       );
 
       expect(response.status).toBe(200);
@@ -2178,6 +2428,8 @@ describe("/api/public/traces API Endpoint", () => {
         GetTracesV1Response,
         "GET",
         "/api/public/traces",
+        undefined,
+        auth,
       );
 
       expect(response.status).toBe(400);
@@ -2218,6 +2470,8 @@ describe("/api/public/traces API Endpoint", () => {
         GetTracesV1Response,
         "GET",
         "/api/public/traces",
+        undefined,
+        auth,
       );
 
       const trace = response.body.data.find((t) => t.id === traceId);
@@ -2251,6 +2505,8 @@ describe("/api/public/traces API Endpoint", () => {
         GetTracesV1Response,
         "GET",
         "/api/public/traces?fields=core,io",
+        undefined,
+        auth,
       );
 
       const trace = response.body.data.find((t) => t.id === traceId);
@@ -2292,6 +2548,8 @@ describe("/api/public/traces API Endpoint", () => {
               GetTracesV1Response,
               "GET",
               `/api/public/traces${queryParam}filter=${encodeURIComponent(filterParam)}`,
+              undefined,
+              auth,
             );
             expect(response.status).toBe(200);
             expect(response.body.data).toBeDefined();
@@ -2317,6 +2575,8 @@ describe("/api/public/traces API Endpoint", () => {
               GetTracesV1Response,
               "GET",
               `/api/public/traces${queryParam}filter=${encodeURIComponent(filterParam)}`,
+              undefined,
+              auth,
             );
             expect(response.status).toBe(200);
             expect(response.body.data).toBeDefined();
@@ -2348,6 +2608,8 @@ describe("/api/public/traces API Endpoint", () => {
               GetTracesV1Response,
               "GET",
               `/api/public/traces${queryParam}filter=${encodeURIComponent(filterParam)}`,
+              undefined,
+              auth,
             );
             expect(response.status).toBe(200);
             expect(response.body.data).toBeDefined();
