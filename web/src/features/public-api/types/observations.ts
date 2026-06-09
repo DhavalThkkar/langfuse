@@ -2,12 +2,12 @@ import {
   type Observation,
   type EventsObservation,
   ObservationLevel,
+  eventsTableSingleFilter,
   paginationMetaResponseZod,
   publicApiPaginationZod,
   singleFilter,
   InvalidRequestError,
 } from "@langfuse/shared";
-
 import {
   reduceUsageOrCostDetails,
   stringDateTime,
@@ -18,7 +18,7 @@ import {
   type ObservationFieldGroupPublicApi,
 } from "@langfuse/shared";
 import { z } from "zod";
-import { useEventsTableSchema } from "../../query/types";
+import { useEventsTableSchema } from "@langfuse/shared/query";
 
 // Re-export for convenience
 export {
@@ -380,7 +380,7 @@ export const GetObservationsV2Query = z.object({
         throw new InvalidRequestError("Invalid JSON in filter parameter");
       }
     })
-    .pipe(z.array(singleFilter).optional()),
+    .pipe(z.array(eventsTableSingleFilter).optional()),
 });
 
 /**
@@ -442,8 +442,14 @@ const APIObservationV2 = z
     latency: z.number().nullable().optional(),
     timeToFirstToken: z.number().nullable().optional(),
 
-    // Enrichment fields
-    modelId: z.string().nullable().optional(),
+    // Enrichment fields (always present on v2 responses).
+    // Populated only when "model" is in the `fields` query param; otherwise null.
+    // Prices are strings (serialized from Prisma Decimal) to preserve backward compatibility
+    // with callers who built typed schemas against the initial v2 wire format.
+    modelId: z.string().nullable(),
+    inputPrice: z.string().nullable(),
+    outputPrice: z.string().nullable(),
+    totalPrice: z.string().nullable(),
 
     // Trace context fields (field group: trace_context)
     traceName: z.string().nullable().optional(),

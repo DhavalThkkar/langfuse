@@ -283,20 +283,6 @@ export const env = createEnv({
     CLICKHOUSE_USER: z.string(),
     CLICKHOUSE_PASSWORD: z.string(),
     CLICKHOUSE_CLUSTER_ENABLED: z.enum(["true", "false"]).default("true"),
-    CLICKHOUSE_MAX_BYTES_BEFORE_EXTERNAL_GROUP_BY: z.coerce
-      .number()
-      .default(32_000_000_000), // ~32GB
-    CLICKHOUSE_USE_QUERY_CONDITION_CACHE: z
-      .enum(["true", "false"])
-      .default("false"),
-    LANGFUSE_ENABLE_SINGLE_LEVEL_QUERY_OPTIMIZATION: z
-      .enum(["true", "false"])
-      .default("false"),
-    LANGFUSE_ROOT_EVENT_CONDITION_MAX_WINDOW_HOURS: z.coerce
-      .number()
-      .int()
-      .nonnegative()
-      .default(168), // 7 days
 
     // EE ui customization
     LANGFUSE_UI_API_HOST: z.string().optional(),
@@ -385,7 +371,6 @@ export const env = createEnv({
       .positive()
       .default(50_000),
     PLAIN_AUTHENTICATION_SECRET: z.string().optional(),
-    PLAIN_API_KEY: z.string().optional(),
     PLAIN_CARDS_API_TOKEN: z.string().optional(),
     PYLON_API_KEY: z.string().optional(),
 
@@ -434,22 +419,24 @@ export const env = createEnv({
     LANGFUSE_API_TRACES_DEFAULT_FIELDS: z.string().optional(),
     LANGFUSE_API_TRACEBYID_DEFAULT_FIELDS: z.string().optional(),
 
-    // Events table migration
-    LANGFUSE_ENABLE_EVENTS_TABLE_OBSERVATIONS: z
+    // V4 preview opt-in. See LFE-9778.
+    LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN: z
       .enum(["true", "false"])
       .default("false"),
 
-    // Events table for UI/tRPC routes (separate from public API flag)
-    LANGFUSE_ENABLE_EVENTS_TABLE_UI: z.enum(["true", "false"]).default("false"),
-
-    LANGFUSE_ENABLE_EVENTS_TABLE_FLAGS: z
+    // Legacy tracing search controls
+    LANGFUSE_DISABLE_LEGACY_TRACING_IO_SEARCH: z
       .enum(["true", "false"])
       .default("false"),
+    // V4 write mode. Mirrors worker/src/env.ts so the web package can gate
+    // public API routes that rely on the legacy traces/observations tables.
+    // The worker owns the writes; the web only needs to know whether legacy
+    // tables are still being populated to decide whether to serve reads.
+    LANGFUSE_MIGRATION_V4_WRITE_MODE: z
+      .enum(["legacy", "dual", "events_only"])
+      .default("legacy"),
 
-    // v2 APIs (events table based) - disabled by default for self-hosters
-    LANGFUSE_ENABLE_EVENTS_TABLE_V2_APIS: z
-      .enum(["true", "false"])
-      .default("false"),
+    LANGFUSE_ENABLE_SCORES_V3_API: z.enum(["true", "false"]).default("false"),
 
     // Blocked users for chat completion API (userId:reason format)
     LANGFUSE_BLOCKED_USERIDS_CHATCOMPLETION: z
@@ -469,6 +456,7 @@ export const env = createEnv({
     AWS_ACCESS_KEY_ID: z.string().optional(),
     AWS_SECRET_ACCESS_KEY: z.string().optional(),
     LANGFUSE_AWS_BEDROCK_REGION: z.string().optional(),
+    LANGFUSE_IN_APP_AGENT_AWS_PROFILE: z.string().optional(),
   },
 
   /**
@@ -525,6 +513,8 @@ export const env = createEnv({
     AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
     AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
     LANGFUSE_AWS_BEDROCK_REGION: process.env.LANGFUSE_AWS_BEDROCK_REGION,
+    LANGFUSE_IN_APP_AGENT_AWS_PROFILE:
+      process.env.LANGFUSE_IN_APP_AGENT_AWS_PROFILE,
     LANGFUSE_TEAM_SLACK_WEBHOOK: process.env.LANGFUSE_TEAM_SLACK_WEBHOOK,
     LANGFUSE_NEW_USER_SIGNUP_WEBHOOK:
       process.env.LANGFUSE_NEW_USER_SIGNUP_WEBHOOK,
@@ -750,7 +740,6 @@ export const env = createEnv({
     // Other
     NEXT_PUBLIC_PLAIN_APP_ID: process.env.NEXT_PUBLIC_PLAIN_APP_ID,
     PLAIN_AUTHENTICATION_SECRET: process.env.PLAIN_AUTHENTICATION_SECRET,
-    PLAIN_API_KEY: process.env.PLAIN_API_KEY,
     PLAIN_CARDS_API_TOKEN: process.env.PLAIN_CARDS_API_TOKEN,
     PYLON_API_KEY: process.env.PYLON_API_KEY,
     // clickhouse
@@ -760,14 +749,6 @@ export const env = createEnv({
     CLICKHOUSE_USER: process.env.CLICKHOUSE_USER,
     CLICKHOUSE_PASSWORD: process.env.CLICKHOUSE_PASSWORD,
     CLICKHOUSE_CLUSTER_ENABLED: process.env.CLICKHOUSE_CLUSTER_ENABLED,
-    CLICKHOUSE_MAX_BYTES_BEFORE_EXTERNAL_GROUP_BY:
-      process.env.CLICKHOUSE_MAX_BYTES_BEFORE_EXTERNAL_GROUP_BY,
-    CLICKHOUSE_USE_QUERY_CONDITION_CACHE:
-      process.env.CLICKHOUSE_USE_QUERY_CONDITION_CACHE,
-    LANGFUSE_ENABLE_SINGLE_LEVEL_QUERY_OPTIMIZATION:
-      process.env.LANGFUSE_ENABLE_SINGLE_LEVEL_QUERY_OPTIMIZATION,
-    LANGFUSE_ROOT_EVENT_CONDITION_MAX_WINDOW_HOURS:
-      process.env.LANGFUSE_ROOT_EVENT_CONDITION_MAX_WINDOW_HOURS,
     // EE ui customization
     LANGFUSE_UI_API_HOST: process.env.LANGFUSE_UI_API_HOST,
     LANGFUSE_UI_DOCUMENTATION_HREF: process.env.LANGFUSE_UI_DOCUMENTATION_HREF,
@@ -857,15 +838,14 @@ export const env = createEnv({
       process.env.LANGFUSE_API_TRACES_DEFAULT_FIELDS,
     LANGFUSE_API_TRACEBYID_DEFAULT_FIELDS:
       process.env.LANGFUSE_API_TRACEBYID_DEFAULT_FIELDS,
-    // Events table migration
-    LANGFUSE_ENABLE_EVENTS_TABLE_OBSERVATIONS:
-      process.env.LANGFUSE_ENABLE_EVENTS_TABLE_OBSERVATIONS,
-    LANGFUSE_ENABLE_EVENTS_TABLE_UI:
-      process.env.LANGFUSE_ENABLE_EVENTS_TABLE_UI,
-    LANGFUSE_ENABLE_EVENTS_TABLE_FLAGS:
-      process.env.LANGFUSE_ENABLE_EVENTS_TABLE_FLAGS,
-    LANGFUSE_ENABLE_EVENTS_TABLE_V2_APIS:
-      process.env.LANGFUSE_ENABLE_EVENTS_TABLE_V2_APIS,
+    LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN:
+      process.env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN,
+    LANGFUSE_MIGRATION_V4_WRITE_MODE:
+      process.env.LANGFUSE_MIGRATION_V4_WRITE_MODE,
+    // Legacy tracing search controls
+    LANGFUSE_DISABLE_LEGACY_TRACING_IO_SEARCH:
+      process.env.LANGFUSE_DISABLE_LEGACY_TRACING_IO_SEARCH,
+    LANGFUSE_ENABLE_SCORES_V3_API: process.env.LANGFUSE_ENABLE_SCORES_V3_API,
     LANGFUSE_BLOCKED_USERIDS_CHATCOMPLETION:
       process.env.LANGFUSE_BLOCKED_USERIDS_CHATCOMPLETION,
   },
