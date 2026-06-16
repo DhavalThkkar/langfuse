@@ -1001,11 +1001,13 @@ class GoogleCloudStorageService implements StorageService {
         if (params.googleCloudCredentials.trim().startsWith("{")) {
           // It's a JSON string
           this.storage = new Storage({
+            universeDomain: env.GOOGLE_CLOUD_UNIVERSE_DOMAIN,
             credentials: JSON.parse(params.googleCloudCredentials),
           });
         } else {
           // It's a path to a credentials file
           this.storage = new Storage({
+            universeDomain: env.GOOGLE_CLOUD_UNIVERSE_DOMAIN,
             keyFilename: params.googleCloudCredentials,
           });
         }
@@ -1015,7 +1017,9 @@ class GoogleCloudStorageService implements StorageService {
       }
     } else {
       // Use default authentication (environment variables or instance metadata)
-      this.storage = new Storage();
+      this.storage = new Storage({
+        universeDomain: env.GOOGLE_CLOUD_UNIVERSE_DOMAIN,
+      });
     }
 
     this.bucket = this.storage.bucket(params.bucketName);
