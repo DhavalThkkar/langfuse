@@ -1,5 +1,8 @@
 # The node alpine image is available here: https://github.com/nodejs/docker-node
-FROM node:24-alpine AS alpine
+ARG NODE_IMAGE=node:24-alpine
+ARG GOLANG_IMAGE=golang:1.24
+
+FROM ${NODE_IMAGE} AS alpine
 
 # It's important to update the index before installing packages to ensure you're getting the latest versions.
 # Check https://github.com/nodejs/docker-node/tree/b4117f9333da4138b03a546ec926ef50a31506c3#nodealpine to understand why libc6-compat might be needed.
@@ -20,7 +23,7 @@ RUN rm -rf /usr/local/lib/node_modules/corepack \
             /root/.cache/node/corepack && \
     rm -f /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg
 
-FROM golang:1.24 AS migrate-builder
+FROM ${GOLANG_IMAGE} AS migrate-builder
 ARG TARGETOS
 ARG TARGETARCH
 ENV CGO_ENABLED=0 \
