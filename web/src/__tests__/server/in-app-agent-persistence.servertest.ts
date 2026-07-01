@@ -1,6 +1,7 @@
 import type { Session } from "next-auth";
 import { EventType } from "@ag-ui/core";
 import { randomUUID } from "crypto";
+import { vi } from "vitest";
 
 import type { Plan } from "@langfuse/shared";
 import { prisma } from "@langfuse/shared/src/db";
@@ -10,7 +11,7 @@ import {
   createInAppAgentConversationId,
   createInAppAgentRunId,
 } from "@/src/ee/features/in-app-agent/ids";
-import type { AgUiEvent } from "@/src/ee/features/in-app-agent/schema";
+import { type AgUiEvent } from "@/src/ee/features/in-app-agent/schema";
 import { inAppAgentRouter } from "@/src/ee/features/in-app-agent/server/router";
 import {
   createRun,
@@ -22,6 +23,11 @@ import {
   toPersistableAgentEvent,
 } from "@/src/ee/features/in-app-agent/server/persistence";
 import { createInnerTRPCContext } from "@/src/server/api/trpc";
+import { IN_APP_AGENT_REDIRECT_TOOL_NAME } from "@/src/ee/features/in-app-agent/constants";
+
+vi.mock("@/src/server/auth", () => ({
+  getServerAuthSession: vi.fn(),
+}));
 
 describe("in-app agent persistence", () => {
   const originalCloudRegion = env.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION;
@@ -66,6 +72,8 @@ describe("in-app agent persistence", () => {
             cloudConfig: undefined,
             name: "Test Organization",
             metadata: {},
+            aiFeaturesEnabled: true,
+            aiTelemetryEnabled: true,
             projects: [
               {
                 id: setup.projectId,
@@ -73,16 +81,14 @@ describe("in-app agent persistence", () => {
                 name: "Test Project",
                 deletedAt: null,
                 retentionDays: null,
+                hasTraces: false,
                 metadata: {},
+                createdAt: new Date().toISOString(),
               },
             ],
           },
         ],
-        featureFlags: {
-          inAppAgent: true,
-          templateFlag: true,
-          excludeClickhouseRead: false,
-        },
+        featureFlags: {},
         admin: false,
       },
       environment: {} as any,
@@ -984,6 +990,174 @@ describe("in-app agent persistence", () => {
         content: "[]",
         toolCallId: "paired-tool-call",
       },
+    ]);
+  });
+
+  it("drops assistant tool calls without results from loaded conversation history", async () => {
+    const { caller, projectId, userId } = await createCaller();
+    const conversation = await createConversation({ projectId, userId });
+    const run = await createConversationRun({
+      projectId,
+      conversationId: conversation.id,
+      userId,
+    });
+    const events = await startCompactRun({
+      projectId,
+      conversationId: conversation.id,
+      runId: run.id,
+      messageId: "user-1",
+      content: "search",
+    });
+    const process = (event: AgUiEvent) =>
+      processAndPersistEvent({
+        projectId,
+        conversationId: conversation.id,
+        runId: run.id,
+        events,
+        event,
+      });
+
+    await process({
+      type: EventType.TEXT_MESSAGE_START,
+      messageId: "assistant-1",
+      role: "assistant",
+    });
+    await process({
+      type: EventType.TOOL_CALL_START,
+      toolCallId: "paired-tool-call",
+      toolCallName: "list_traces",
+      parentMessageId: "assistant-1",
+    });
+    await process({
+      type: EventType.TOOL_CALL_ARGS,
+      toolCallId: "paired-tool-call",
+      delta: "{}",
+    });
+    await process({
+      type: EventType.TOOL_CALL_END,
+      toolCallId: "paired-tool-call",
+    });
+    await process({
+      type: EventType.TOOL_CALL_START,
+      toolCallId: "unapproved-tool-call",
+      toolCallName: "get_trace",
+      parentMessageId: "assistant-1",
+    });
+    await process({
+      type: EventType.TOOL_CALL_ARGS,
+      toolCallId: "unapproved-tool-call",
+      delta: "{}",
+    });
+    await process({
+      type: EventType.TOOL_CALL_END,
+      toolCallId: "unapproved-tool-call",
+    });
+    await process({
+      type: EventType.TEXT_MESSAGE_CONTENT,
+      messageId: "assistant-1",
+      delta: "calling tools",
+    });
+    await process({
+      type: EventType.TEXT_MESSAGE_END,
+      messageId: "assistant-1",
+    });
+    await process({
+      type: EventType.TOOL_CALL_RESULT,
+      messageId: "tool-result-1",
+      toolCallId: "paired-tool-call",
+      content: "[]",
+      role: "tool",
+    });
+
+    const detail = await caller.getConversation({
+      projectId,
+      conversationId: conversation.id,
+    });
+
+    expect(detail.messages).toEqual([
+      { id: "user-1", role: "user", content: "search" },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "calling tools",
+        runId: run.id,
+        toolCalls: [
+          {
+            id: "paired-tool-call",
+            type: "function",
+            function: { name: "list_traces", arguments: "{}" },
+          },
+        ],
+      },
+      {
+        id: "tool-result-1",
+        role: "tool",
+        content: "[]",
+        toolCallId: "paired-tool-call",
+      },
+    ]);
+  });
+
+  it("drops failed redirect tool results before replay", async () => {
+    const { projectId, userId } = await createCaller();
+    const conversation = await createConversation({ projectId, userId });
+    const run = await createConversationRun({
+      projectId,
+      conversationId: conversation.id,
+      userId,
+    });
+    const events = await startCompactRun({
+      projectId,
+      conversationId: conversation.id,
+      runId: run.id,
+      messageId: "user-1",
+      content: "open a trace",
+    });
+    const process = (event: AgUiEvent) =>
+      processAndPersistEvent({
+        projectId,
+        conversationId: conversation.id,
+        runId: run.id,
+        events,
+        event,
+      });
+
+    await process({
+      type: EventType.TEXT_MESSAGE_START,
+      messageId: "assistant-1",
+      role: "assistant",
+    });
+    await process({
+      type: EventType.TOOL_CALL_START,
+      toolCallId: "redirect-tool-call",
+      toolCallName: IN_APP_AGENT_REDIRECT_TOOL_NAME,
+      parentMessageId: "assistant-1",
+    });
+    await process({
+      type: EventType.TOOL_CALL_ARGS,
+      toolCallId: "redirect-tool-call",
+      delta: '{"destination":"trace"}',
+    });
+    await process({
+      type: EventType.TOOL_CALL_END,
+      toolCallId: "redirect-tool-call",
+    });
+    await process({
+      type: EventType.TOOL_CALL_RESULT,
+      messageId: "tool-result-1",
+      toolCallId: "redirect-tool-call",
+      content: "Tool validation failed: trace params are required",
+      role: "tool",
+    });
+
+    await expect(
+      getConversationMessagesForReplay({
+        prisma,
+        projectId,
+        conversationId: conversation.id,
+      }),
+    ).resolves.toEqual([
+      { id: "user-1", role: "user", content: "open a trace" },
     ]);
   });
 

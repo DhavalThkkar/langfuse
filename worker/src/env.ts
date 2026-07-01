@@ -1,4 +1,5 @@
 import { removeEmptyEnvVariables } from "@langfuse/shared";
+import { langfuseS3EventKeyMaxSegmentBytesSchema } from "@langfuse/shared/src/env";
 import { z } from "zod";
 
 const EnvSchema = z.object({
@@ -51,6 +52,12 @@ const EnvSchema = z.object({
     .default("false"),
   LANGFUSE_S3_EVENT_UPLOAD_SSE: z.enum(["AES256", "aws:kms"]).optional(),
   LANGFUSE_S3_EVENT_UPLOAD_SSE_KMS_KEY_ID: z.string().optional(),
+  // Validation rules live in `@langfuse/shared/src/env` so producer and
+  // consumer agree on what values are accepted. Must match the web container's
+  // resolved value at deploy time; otherwise web and worker can write/read
+  // different S3 keys for the same id.
+  LANGFUSE_S3_EVENT_KEY_MAX_SEGMENT_BYTES:
+    langfuseS3EventKeyMaxSegmentBytesSchema,
 
   BATCH_EXPORT_PAGE_SIZE: z.coerce.number().positive().default(500),
   BATCH_EXPORT_ROW_LIMIT: z.coerce.number().positive().default(1_500_000),
@@ -135,6 +142,16 @@ const EnvSchema = z.object({
     .number()
     .positive()
     .default(5),
+  LANGFUSE_LLM_AS_JUDGE_QUEUE_RETRY_MAX_ATTEMPTS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .default(4),
+  LANGFUSE_LLM_AS_JUDGE_QUEUE_RETRY_MAX_AGE_SECONDS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(120 * 60),
   LANGFUSE_CODE_EVAL_EXECUTION_WORKER_CONCURRENCY: z.coerce
     .number()
     .positive()
@@ -460,11 +477,42 @@ const EnvSchema = z.object({
     .enum(["true", "false"])
     .default("false"),
 
+  // Background-migration env gates. Names share the LANGFUSE_BACKGROUND_MIGRATION_
+  // prefix so the BackgroundMigrationManager can discover them by scanning env
+  // keys; each gates one or more rows in the background_migrations table via
+  // `args.envGate`. Default to "false" so dormant migrations only run when the
+  // operator explicitly opts in.
+  LANGFUSE_BACKGROUND_MIGRATION_V4_ENABLE_HISTORIC_BACKFILL: z
+    .enum(["true", "false"])
+    .default("false"),
+  LANGFUSE_BACKGROUND_MIGRATION_V4_DROP_PID_TID_SORTING_TABLES: z
+    .enum(["true", "false"])
+    .default("false"),
+
   LANGFUSE_EXPERIMENT_EVENT_PROPAGATION_PARTITION_DELAY_MINUTES: z.coerce
     .number()
     .positive()
     .int()
     .default(10),
+
+  // Health-check threshold for the event-propagation ("dual write") job. When a
+  // client opts in via /api/health?failIfEventPropagationStuck=true, the check
+  // returns 503 if the heartbeat has not been refreshed within this many minutes,
+  // letting k8s liveness probes restart a container whose global-concurrency
+  // slot is wedged. The heartbeat is refreshed at the top of every invocation and
+  // per-chunk during the experiment backfill, so the threshold only needs to
+  // exceed the longest un-heartbeated step — a single CH INSERT (request_timeout
+  // 10 min). 15 min leaves headroom.
+  //
+  // Probes using this flag MUST set initialDelaySeconds >= 60s (one cron cycle):
+  // the heartbeat is only refreshed when the minute-boundary cron next runs, so a
+  // just-restarted (or just-re-enabled) container can carry a stale value until
+  // then. A shorter delay can crash-loop the very restart this check triggers.
+  LANGFUSE_EVENT_PROPAGATION_STUCK_THRESHOLD_MINUTES: z.coerce
+    .number()
+    .positive()
+    .int()
+    .default(15),
 
   LANGFUSE_WEBHOOK_QUEUE_PROCESSING_CONCURRENCY: z.coerce
     .number()

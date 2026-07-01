@@ -1405,18 +1405,18 @@ export class OtelIngestionProcessor {
         }
       }
       return result;
-    } else {
-      const result: Record<string, unknown> = Object.create(null);
-      for (const key of keys) {
-        const pathParts = key.split(".");
-        if (pathParts.length === 1) {
-          result[key] = input[`${prefix}.${key}`];
-        } else {
-          setNestedValue(result, pathParts, input[`${prefix}.${key}`]);
-        }
-      }
-      return result;
     }
+
+    const result: Record<string, unknown> = Object.create(null);
+    for (const key of keys) {
+      const pathParts = key.split(".");
+      if (pathParts.length === 1) {
+        result[key] = input[`${prefix}.${key}`];
+      } else {
+        setNestedValue(result, pathParts, input[`${prefix}.${key}`]);
+      }
+    }
+    return result;
   }
 
   private extractInputAndOutput(params: {
@@ -1492,6 +1492,16 @@ export class OtelIngestionProcessor {
       // Genkit
       "genkit:input",
       "genkit:output",
+      // Flue (@flue/opentelemetry)
+      "flue.turn.input",
+      "flue.turn.output",
+      "flue.tool.arguments",
+      "flue.tool.result",
+      "flue.task.prompt",
+      "flue.task.result",
+      "flue.operation.result",
+      "flue.workflow.payload",
+      "flue.workflow.result",
     ];
 
     // Delete simple keys
@@ -1597,7 +1607,39 @@ export class OtelIngestionProcessor {
                         : undefined;
       }
 
+      const genAiInputOutput =
+        this.extractOpenTelemetryGenAiInputAndOutput(attributes);
+      input ??= genAiInputOutput?.input;
+      output ??= genAiInputOutput?.output;
+
       return { input, output, filteredAttributes };
+    }
+
+    // Flue (https://flueframework.com)
+    // The @flue/opentelemetry adapter emits content under flue.* attributes that
+    // differ by span type (model turn, tool call, delegated task, workflow,
+    // operation). Pick the input/output pair for whichever span this is. The
+    // flue.* namespace is unique, so attribute presence is a safe gate.
+    {
+      const flueInput =
+        attributes["flue.turn.input"] ??
+        attributes["flue.tool.arguments"] ??
+        attributes["flue.task.prompt"] ??
+        attributes["flue.workflow.payload"];
+      const flueOutput =
+        attributes["flue.turn.output"] ??
+        attributes["flue.tool.result"] ??
+        attributes["flue.task.result"] ??
+        attributes["flue.operation.result"] ??
+        attributes["flue.workflow.result"];
+
+      if (flueInput != null || flueOutput != null) {
+        return {
+          input: this.parseJsonPayload(flueInput) ?? flueInput ?? null,
+          output: this.parseJsonPayload(flueOutput) ?? flueOutput ?? null,
+          filteredAttributes,
+        };
+      }
     }
 
     const inputEvents = events.filter(
@@ -1860,27 +1902,42 @@ export class OtelIngestionProcessor {
       };
     }
 
+    const genAiInputOutput =
+      this.extractOpenTelemetryGenAiInputAndOutput(attributes);
+    if (genAiInputOutput) {
+      return { ...genAiInputOutput, filteredAttributes };
+    }
+
+    return { input: null, output: null, filteredAttributes };
+  }
+
+  private extractOpenTelemetryGenAiInputAndOutput(
+    attributes: Record<string, unknown>,
+  ): { input: unknown; output: unknown } | null {
     // OpenTelemetry messages (https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans)
-    input = attributes["gen_ai.input.messages"];
-    output = attributes["gen_ai.output.messages"];
+    let input = attributes["gen_ai.input.messages"];
+    let output = attributes["gen_ai.output.messages"];
+
     if (input && attributes["gen_ai.system_instructions"]) {
       input = this.prependSystemInstructions(
         input,
         attributes["gen_ai.system_instructions"],
       );
     }
+
     if (input || output) {
-      return { input, output, filteredAttributes };
+      return { input, output };
     }
 
     // OpenTelemetry tools (https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans)
     input = attributes["gen_ai.tool.call.arguments"];
     output = attributes["gen_ai.tool.call.result"];
+
     if (input || output) {
-      return { input, output, filteredAttributes };
+      return { input, output };
     }
 
-    return { input: null, output: null, filteredAttributes };
+    return null;
   }
 
   /**
@@ -2551,9 +2608,16 @@ export class OtelIngestionProcessor {
     );
     if (fromAttribute !== null) return fromAttribute;
 
-    if (attributes["gen_ai.usage.cost"]) {
-      return { total: attributes["gen_ai.usage.cost"] };
+    const genAiUsageCost = attributes["gen_ai.usage.cost"];
+    if (genAiUsageCost != null && genAiUsageCost !== "") {
+      return { total: genAiUsageCost };
     }
+
+    const openInferenceTotalCost = attributes["llm.cost.total"];
+    if (openInferenceTotalCost != null && openInferenceTotalCost !== "") {
+      return { total: openInferenceTotalCost };
+    }
+
     return {};
   }
 

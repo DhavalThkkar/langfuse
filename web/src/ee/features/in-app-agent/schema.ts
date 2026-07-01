@@ -47,6 +47,13 @@ export type InAppAgentMessageFeedback = z.infer<
   typeof InAppAgentMessageFeedbackSchema
 >;
 
+// Changes to this schema need to be backwards-compatible as messages with this are already persisted.
+export const InAppAgentRedirectActionToolResultSchema = z.object({
+  type: z.literal("redirectAction"),
+  label: z.string().min(1).max(80),
+  href: z.string().min(1),
+});
+
 const AgUiInputContentSourceSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("data"),
@@ -210,6 +217,29 @@ export type AgUiCustomEvent = AgUiEvent & {
   name: string;
   value: unknown;
 };
+
+export const InAppAgentToolApprovalRequestSchema = z.object({
+  type: z.literal("tool_approval_request"),
+  toolCallId: z.string().min(1),
+  toolName: z.string().min(1),
+  args: z.unknown().optional(),
+  runId: z.string().min(1),
+});
+
+export type InAppAgentToolApprovalRequest = z.infer<
+  typeof InAppAgentToolApprovalRequestSchema
+>;
+
+export const ResumeForwardedPropsSchema = z.object({
+  command: z.object({
+    resume: z.object({
+      approved: z.boolean(),
+      approvalRequest: InAppAgentToolApprovalRequestSchema,
+    }),
+  }),
+});
+
+export type ResumeForwardedProps = z.infer<typeof ResumeForwardedPropsSchema>;
 
 export const InAppAgentRuntimeStateSchema = z.discriminatedUnion("type", [
   z.object({
