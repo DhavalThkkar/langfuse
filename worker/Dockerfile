@@ -13,7 +13,7 @@ RUN npm install turbo@2.9.18 --global
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
-RUN corepack prepare pnpm@11.4.0 --activate
+RUN corepack prepare pnpm@11.10.0 --activate
 
 FROM alpine AS runtime-base
 # package managers and build-only CLIs only increase exposure to CVEs -> remove them

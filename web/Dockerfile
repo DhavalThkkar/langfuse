@@ -14,7 +14,7 @@ RUN npm install turbo@2.9.18 --global
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
-RUN corepack prepare pnpm@11.4.0 --activate
+RUN corepack prepare pnpm@11.10.0 --activate
 
 FROM alpine AS runtime-base
 # Remove build-only package managers. npm stays here because the runner stage
