@@ -38,7 +38,7 @@ export function CloudRegionSwitch({
     <div className="bg-card mt-8 -mb-10 rounded-lg px-6 py-6 text-sm sm:mx-auto sm:w-full sm:max-w-[480px] sm:rounded-lg sm:px-10">
       <div className="flex w-full flex-col gap-2">
         <div>
-          <span className="text-sm leading-none font-medium">
+          <span className="text-sm leading-none font-bold">
             Data Region
             <DataRegionInfo />
           </span>
@@ -100,7 +100,7 @@ export function CloudRegionSwitch({
                 href="https://langfuse.com/security/hipaa"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-primary-accent hover:text-hover-primary-accent underline"
+                className="text-link hover:text-link-hover underline"
               >
                 Learn more about HIPAA compliance →
               </a>
@@ -117,7 +117,7 @@ const DataRegionInfo = () => (
     <DialogTrigger asChild>
       <a
         href="#"
-        className="text-primary-accent hover:text-hover-primary-accent ml-1 text-xs"
+        className="text-link hover:text-link-hover ml-1 text-xs"
         title="What is this?"
         tabIndex={-1}
       >
@@ -155,7 +155,7 @@ const DataRegionInfo = () => (
               href="https://langfuse.com/security/data-regions"
               target="_blank"
               rel="noopener noreferrer"
-              className="text-primary-accent underline"
+              className="text-link hover:text-link-hover underline"
             >
               data regions
             </a>{" "}
@@ -164,7 +164,7 @@ const DataRegionInfo = () => (
               href="https://langfuse.com/docs/data-security-privacy"
               target="_blank"
               rel="noopener noreferrer"
-              className="text-primary-accent underline"
+              className="text-link hover:text-link-hover underline"
             >
               data security & privacy
             </a>

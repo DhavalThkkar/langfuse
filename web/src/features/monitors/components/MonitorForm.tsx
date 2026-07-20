@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useMemo, useRef } from "react";
 import { useRouter } from "next/router";
 import { type LucideIcon, Plus } from "lucide-react";
 import { useForm, useWatch } from "react-hook-form";
@@ -80,11 +80,13 @@ import {
   ObservationTypeDomain,
   viewDeclarations,
   type FilterState,
+  type TimeFilter,
 } from "@langfuse/shared";
 
 import TagManager from "@/src/features/tag/components/TagManager";
 
 import { MonitorChartPreview } from "./MonitorChartPreview";
+import { getMonitorFilterOptionsLookbackFrom } from "../helpers/monitorTimeRanges";
 import { MonitorAutomationsPanel } from "./MonitorAutomationsPanel";
 import { MonitorSeverityBadge } from "./MonitorSeverityBadge";
 import { Badge } from "@/src/components/ui/badge";
@@ -181,6 +183,7 @@ const buildFilterColumnsParams = ({
     viewVersion: "v2" as const,
     environmentOptions: filterOptions?.environment ?? [],
     nameOptions: normalizeSingleValueOptions(filterOptions?.traceName),
+    observationNameOptions: normalizeSingleValueOptions(filterOptions?.name),
     tagsOptions: filterOptions?.traceTags ?? [],
     modelOptions: filterOptions?.providedModelName ?? [],
     toolNamesOptions: filterOptions?.toolNames ?? [],
@@ -312,17 +315,24 @@ export const MonitorForm = ({
   const watched = useWatch({ control: form.control });
   const monitorWindow = (watched.window ?? "5m") as MonitorWindow;
 
-  // Push the live name up to the host (e.g. the edit page header) so the page
-  // title can mirror it as the user types instead of waiting for save.
-  useEffect(() => {
-    onNameChange?.(watched.name ?? "");
-  }, [watched.name, onNameChange]);
+  /** filterOptionsStartTimeFilter lower-bounds discovery at max(20×window, 7d) so even a small monitor window still yields value suggestions. */
+  const filterOptionsStartTimeFilter = useMemo<TimeFilter[]>(
+    () => [
+      {
+        column: "startTime",
+        type: "datetime",
+        operator: ">=",
+        value: getMonitorFilterOptionsLookbackFrom(monitorWindow, Date.now()),
+      },
+    ],
+    [monitorWindow],
+  );
 
   /** eventsFilterOptions loads the events v2 filter dictionary (environments, tags, models, …) for the picked view. */
   const eventsFilterOptions = api.events.filterOptions.useQuery(
     {
       projectId,
-      monitorWindow,
+      startTimeFilter: filterOptionsStartTimeFilter,
     },
     {
       trpc: { context: { skipBatch: true } },
@@ -675,7 +685,7 @@ export const MonitorForm = ({
                         <span className="text-sm whitespace-nowrap">
                           Threshold
                         </span>
-                        <span className="mr-1.5 ml-1 font-mono text-xs font-semibold">
+                        <span className="mr-1.5 ml-1 font-mono text-xs font-bold">
                           {
                             operatorSymbol[
                               (watched.thresholdOperator ??
@@ -719,7 +729,7 @@ export const MonitorForm = ({
                         <span className="text-sm whitespace-nowrap">
                           Threshold
                         </span>
-                        <span className="mr-1.5 ml-1 font-mono text-xs font-semibold">
+                        <span className="mr-1.5 ml-1 font-mono text-xs font-bold">
                           {
                             operatorSymbol[
                               (watched.thresholdOperator ??
@@ -782,7 +792,7 @@ export const MonitorForm = ({
                 />
                 <Accordion type="single" collapsible>
                   <AccordionItem value="advanced" className="border-b-0">
-                    <AccordionTrigger className="justify-start gap-2 py-2 text-sm font-medium [&>svg]:order-first [&>svg]:-rotate-90 [&[data-state=open]>svg]:rotate-0">
+                    <AccordionTrigger className="justify-start gap-2 py-2 text-sm font-bold [&>svg]:order-first [&>svg]:-rotate-90 [&[data-state=open]>svg]:rotate-0">
                       Advanced Options
                     </AccordionTrigger>
                     <AccordionContent className="space-y-6 px-1 pt-2">
@@ -833,6 +843,10 @@ export const MonitorForm = ({
                           disabled={!hasAccess}
                           {...field}
                           value={field.value ?? ""}
+                          onChange={(e) => {
+                            field.onChange(e);
+                            onNameChange?.(e.target.value ?? "");
+                          }}
                         />
                       </FormControl>
                       <FormMessage />
@@ -948,7 +962,7 @@ const Header = ({
   <div className="bg-card sticky top-0 z-10">
     <h3 className="flex items-center gap-2 py-2 text-lg font-bold">
       {step != null ? (
-        <span className="bg-foreground text-background flex h-6 w-6 items-center justify-center rounded-full text-sm font-semibold">
+        <span className="bg-foreground text-background flex h-6 w-6 items-center justify-center rounded-full text-sm font-bold">
           {step}
         </span>
       ) : null}
@@ -1021,7 +1035,7 @@ const NoDataField = ({
             Keep the previous
             <Badge
               variant="secondary"
-              className="w-20 justify-center bg-slate-500 py-1 text-slate-50 hover:bg-slate-500"
+              className="bg-muted-foreground text-background hover:bg-muted-foreground w-20 justify-center py-1"
             >
               SEVERITY
             </Badge>
